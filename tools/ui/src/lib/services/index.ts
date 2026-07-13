@@ -60,6 +60,32 @@
 export { ChatService } from './chat.service';
 
 /**
+ * **CompactionService** - conversation auto-compaction
+ *
+ * Keeps long conversations within the model context by folding older turns into
+ * a single recap message. The recap is a first-class tree node (`type:
+ * 'compaction'`, `role: 'user'`), so it survives export/import, converts to
+ * a normal user message on send, and renders as a divider.
+ *
+ * **Responsibilities:**
+ * - **Read-time collapse** (`collapseForSend`): given a resolved branch, drop the
+ *   effective recap's transitive coverage (`effectiveRecap`: widest coverage,
+ *   newest fold epoch on ties) and emit `system -> recap -> retained tail`,
+ *   preserving order so each assistant stays adjacent to its tool results.
+ * - **Occupancy & triggering**: decide when to compact from server-reported per-turn
+ *   token counts (`prompt_n + cache_n + predicted_n`).
+ * - **Recap generation**: summarize the folded turns via the chat model and persist
+ *   the checkpoint node as a strict linear chain, guarded against re-entry, aborts,
+ *   and conversation switches.
+ *
+ * Stateless: the store owns triggering and persistence and calls in here for the
+ * pure logic.
+ *
+ * @see chatStore in stores/chat.svelte.ts - wires `collapseForSend` into the send funnel
+ */
+export { CompactionService } from './compaction.service';
+
+/**
  * **DatabaseService** - IndexedDB persistence layer via Dexie ORM
  *
  * Provides stateless data access for conversations and messages using IndexedDB.
