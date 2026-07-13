@@ -1,6 +1,27 @@
 import { MessageRole, MessageType } from '$lib/enums';
 import type { ChatMessageTimings, DatabaseMessage } from '$lib/types';
 
+const RECAP_PREFIX = 'Summary of the earlier conversation (compacted to save context):';
+
+/**
+ * Token cost of one attachment, used only when estimating a turn the server
+ * never measured (an image is many tokens but zero whitespace-words). Coarse on
+ * purpose - it is a fallback, and overflow-recovery backstops any under-estimate.
+ */
+const EST_TOKENS_PER_ATTACHMENT = 2048;
+
+/** Result of planning a compaction over a branch. */
+export type CompactionPlan =
+	| { fold: false; reason: string }
+	| {
+			fold: true;
+			system: DatabaseMessage[];
+			/** older turns to summarize into the recap and exclude from future sends */
+			foldMessages: DatabaseMessage[];
+			/** recent turns kept verbatim */
+			keepMessages: DatabaseMessage[];
+	  };
+
 /**
  * Conversation auto-compaction.
  *
@@ -286,5 +307,167 @@ export class CompactionService {
 	): boolean {
 		if (used == null || nCtx == null || nCtx <= 0) return false;
 		return used / nCtx >= thresholdPercent / 100;
+	}
+
+	/**
+	 * Group a branch body (non-system messages) into whole turns.
+	 *
+	 * A turn starts at a USER message. A recap node is `role: 'user'`, so it
+	 * starts one too, and the assistant/tool messages answering it attach to
+	 * the same turn. Whole-turn boundaries are what keep an assistant's
+	 * `tool_calls` adjacent to their results.
+	 */
+	static groupIntoTurns(body: DatabaseMessage[]): DatabaseMessage[][] {
+		const turns: DatabaseMessage[][] = [];
+		for (const m of body) {
+			if (m.role === MessageRole.USER || turns.length === 0) {
+				turns.push([m]);
+			} else {
+				turns[turns.length - 1].push(m);
+			}
+		}
+		return turns;
+	}
+
+	/**
+	 * Decide what to fold. Keeps the newest whole turns that fit `retainPercent` of
+	 * `nCtx` and folds everything older. Sizes come from server-measured cumulative
+	 * occupancy (history is never re-tokenized).
+	 *
+	 * a whitespace + per-attachment estimate is used ONLY for turns the server
+	 * didn't measure (imported conversations), never mixed into the exact server
+	 * numbers.
+	 *
+	 * `force` (overflow / manual / already over threshold) folds at least
+	 * the oldest turn even when sizing thinks the branch already fits.
+	 */
+	static planCompaction(
+		branch: DatabaseMessage[],
+		nCtx: number,
+		retainPercent: number,
+		force = false
+	): CompactionPlan {
+		const system = branch.filter((m) => m.role === MessageRole.SYSTEM);
+		const body = branch.filter((m) => m.role !== MessageRole.SYSTEM);
+		const turns = CompactionService.groupIntoTurns(body);
+
+		if (turns.length < 2) return { fold: false, reason: 'No older turns to fold.' };
+
+		// Cumulative occupancy through each turn.
+		//
+		// A turn's exact server timing is trusted only when its assistant was measured
+		// BELOW the latest recap (i.e. AFTER the fold).
+		//
+		// A retained-tail turn measured BEFORE the fold still counts the folded region,
+		// so its recorded reading is stale-high.
+		//
+		// Thus it is sized by estimate instead, like an unmeasured turn.
+		const byId = new Map(branch.map((m) => [m.id, m]));
+		const recaps = body.filter((m) => m.type === MessageType.COMPACTION);
+		const latestRecap = recaps.length
+			? recaps.reduce((a, b) => (b.timestamp > a.timestamp ? b : a))
+			: undefined;
+		const belowRecap = (turn: DatabaseMessage[]): boolean => {
+			if (!latestRecap) return true;
+			for (let i = turn.length - 1; i >= 0; i--) {
+				if (turn[i].role !== MessageRole.ASSISTANT) continue;
+				if (CompactionService.occupancyTokens(turn[i].timings) == null) continue;
+				const createdAt = latestRecap.compaction?.createdAt;
+				if (createdAt != null && turn[i].timestamp > createdAt) return true;
+				let cur: DatabaseMessage | undefined = turn[i];
+				while (cur) {
+					if (cur.id === latestRecap.id) return true;
+					cur = cur.parent ? byId.get(cur.parent) : undefined;
+				}
+				return false;
+			}
+			return false;
+		};
+		const cum: number[] = [];
+		let running = 0;
+		for (let t = 0; t < turns.length; t++) {
+			const exact = CompactionService.turnCumulative(turns[t]);
+			running =
+				exact != null && belowRecap(turns[t])
+					? exact
+					: running + CompactionService.estimateTurnTokens(turns[t]);
+			cum[t] = running;
+		}
+		const total = CompactionService.currentOccupancy(branch) ?? cum[turns.length - 1];
+
+		const retainBudget = Math.floor((retainPercent / 100) * nCtx);
+		if (total - retainBudget <= 0 && !force) {
+			return { fold: false, reason: 'Already within the retain budget.' };
+		}
+
+		// Fold the fewest oldest turns so the kept tail fits the budget, never fold the
+		// last (current) turn.
+		let k = 1;
+		for (let i = 0; i < turns.length - 1; i++) {
+			k = i + 1;
+			if (total - cum[i] <= retainBudget) break;
+		}
+
+		let foldMessages = turns.slice(0, k).flat();
+		// A fold of only recap nodes cannot reduce the context. After any prior
+		// fold turns[0] is the hoisted recap alone, so `force` (overflow/manual)
+		// must extend past it or overflow recovery dead-ends on every retry.
+		while (
+			force &&
+			k < turns.length - 1 &&
+			foldMessages.every((m) => m.type === MessageType.COMPACTION)
+		) {
+			k += 1;
+			foldMessages = turns.slice(0, k).flat();
+		}
+		if (foldMessages.every((m) => m.type === MessageType.COMPACTION)) {
+			return { fold: false, reason: 'Nothing new to fold.' };
+		}
+
+		return {
+			fold: true,
+			system,
+			foldMessages,
+			keepMessages: turns.slice(k).flat()
+		};
+	}
+
+	/** Recap node content: a fixed prefix followed by the generated summary. */
+	static formatRecap(summary: string): string {
+		return `${RECAP_PREFIX}\n\n${summary.trim()}`;
+	}
+
+	/** Cumulative occupancy of a turn - its last assistant's timings, or null. */
+	private static turnCumulative(turn: DatabaseMessage[]): number | null {
+		for (let i = turn.length - 1; i >= 0; i--) {
+			if (turn[i].role !== MessageRole.ASSISTANT) continue;
+			const used = CompactionService.occupancyTokens(turn[i].timings);
+			if (used != null) return used;
+		}
+		return null;
+	}
+
+	/**
+	 * Estimate size of a turn the server didn't measure: whitespace-token count
+	 * of the text content and tool-call JSON, plus a flat constant per attachment.
+	 */
+	private static estimateTurnTokens(turn: DatabaseMessage[]): number {
+		let n = 0;
+		for (const m of turn) {
+			n += CompactionService.wordCount(m.content) + CompactionService.wordCount(m.toolCalls);
+			n += (m.extra?.length ?? 0) * EST_TOKENS_PER_ATTACHMENT;
+		}
+		return n;
+	}
+
+	private static wordCount(text: string | undefined): number {
+		if (!text) return 0;
+		const trimmed = text.trim();
+		if (!trimmed) return 0;
+		// Whitespace tokens under-count CJK / whitespace-poor text by 1-2 orders of
+		// magnitude (a whole CJK paragraph splits into ~1 "word"), which would let an
+		// imported non-whitespace conversation dodge sizing. Fall back to a chars/4
+		// token estimate.
+		return Math.max(trimmed.split(/\s+/).length, Math.ceil(trimmed.length / 4));
 	}
 }
