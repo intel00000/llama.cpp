@@ -72,6 +72,7 @@ export type {
 // Database types
 export type {
 	McpServerOverride,
+	CompactionMetadata,
 	DatabaseConversation,
 	DatabaseMessageExtraAudioFile,
 	DatabaseMessageExtraVideoFile,

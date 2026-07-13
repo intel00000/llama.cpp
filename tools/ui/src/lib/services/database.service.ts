@@ -700,9 +700,19 @@ export class DatabaseService {
 						.filter((childId: string) => idMap.has(childId))
 						.map((childId: string) => idMap.get(childId)!);
 
+					const newCompaction = msg.compaction
+						? {
+								...msg.compaction,
+								summarizedMessageIds: msg.compaction.summarizedMessageIds
+									.map((id: string) => idMap.get(id))
+									.filter((id: string | undefined): id is string => id !== undefined)
+							}
+						: undefined;
+
 					return {
 						...msg,
 						children: newChildren,
+						...(newCompaction ? { compaction: newCompaction } : {}),
 						convId: newConvId,
 						extra: options.includeAttachments ? msg.extra : undefined,
 						id: newId,

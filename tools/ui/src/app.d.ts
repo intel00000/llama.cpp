@@ -41,6 +41,7 @@ import type {
 	ChatRole,
 	ChatUploadedFile,
 	// Database types
+	CompactionMetadata,
 	DatabaseConversation,
 	DatabaseMessage,
 	DatabaseMessageExtra,
@@ -108,6 +109,7 @@ declare global {
 		ChatRole,
 		ChatUploadedFile,
 		// Database types
+		CompactionMetadata,
 		DatabaseConversation,
 		DatabaseMessage,
 		DatabaseMessageExtra,
