@@ -6,12 +6,13 @@
 	import { DatabaseService } from '$lib/services/database.service';
 	import { SYSTEM_MESSAGE_PLACEHOLDER } from '$lib/constants';
 	import { REASONING_TAGS } from '$lib/constants/agentic';
-	import { MessageRole, AttachmentType, AgenticSectionType } from '$lib/enums';
+	import { MessageRole, MessageType, AttachmentType, AgenticSectionType } from '$lib/enums';
 	import { fadeInView } from '$lib/actions/fade-in-view.svelte';
 	import {
 		ChatMessageAssistant,
 		ChatMessageUser,
 		ChatMessageSystem,
+		ChatMessageCompaction,
 		ChatMessageMcpPrompt
 	} from '$lib/components/app/chat';
 	import { parseFilesToMessageExtras } from '$lib/utils/browser-only';
@@ -329,7 +330,9 @@
 </script>
 
 <div use:fadeInView class="chat-message">
-	{#if message.role === MessageRole.SYSTEM}
+	{#if message.type === MessageType.COMPACTION}
+		<ChatMessageCompaction class={className} {message} />
+	{:else if message.role === MessageRole.SYSTEM}
 		<ChatMessageSystem
 			bind:textareaElement
 			class={className}

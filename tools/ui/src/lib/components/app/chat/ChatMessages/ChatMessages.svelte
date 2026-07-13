@@ -3,7 +3,7 @@
 	import { beforeNavigate, afterNavigate } from '$app/navigation';
 	import { ChatMessage, ChatMessageUserPending } from '$lib/components/app';
 	import { setChatActionsContext } from '$lib/contexts';
-	import { MessageRole } from '$lib/enums';
+	import { MessageRole, MessageType } from '$lib/enums';
 	import { chatStore } from '$lib/stores/chat.svelte';
 	import {
 		chatPendingMessageContent,
@@ -253,12 +253,21 @@
 			}
 		}
 
-		if (lastAssistantIdx > 0 && result[lastAssistantIdx - 1].message.role === MessageRole.USER) {
+		if (
+			lastAssistantIdx > 0 &&
+			result[lastAssistantIdx - 1].message.role === MessageRole.USER &&
+			result[lastAssistantIdx - 1].message.type !== MessageType.COMPACTION
+		) {
 			result[lastAssistantIdx - 1].isLastUserMessage = true;
 		}
 
+		// exclude compaction messages from nextAssistantMessage linking
 		for (let i = 0; i < result.length; i++) {
-			if (result[i].message.role !== MessageRole.USER) continue;
+			if (
+				result[i].message.role !== MessageRole.USER ||
+				result[i].message.type === MessageType.COMPACTION
+			)
+				continue;
 
 			for (let j = i + 1; j < result.length; j++) {
 				if (result[j].message.role === MessageRole.ASSISTANT) {

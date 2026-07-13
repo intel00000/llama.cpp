@@ -600,6 +600,12 @@ export { default as ChatMessageUserPending } from './ChatMessages/ChatMessage/Ch
 export { default as ChatMessageSystem } from './ChatMessages/ChatMessage/ChatMessageSystem/ChatMessageSystem.svelte';
 
 /**
+ * Compaction recap divider. Renders a `type: 'compaction'` node as a centered
+ * divider ("Compacted N messages, ~X tokens freed") that expands to show the recap.
+ */
+export { default as ChatMessageCompaction } from './ChatMessages/ChatMessage/ChatMessageCompaction/ChatMessageCompaction.svelte';
+
+/**
  *
  * SCREEN
  *
