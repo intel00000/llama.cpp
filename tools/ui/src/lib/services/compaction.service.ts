@@ -1,5 +1,5 @@
 import { MessageRole, MessageType } from '$lib/enums';
-import type { DatabaseMessage } from '$lib/types';
+import type { ChatMessageTimings, DatabaseMessage } from '$lib/types';
 
 /**
  * Conversation auto-compaction.
@@ -184,5 +184,107 @@ export class CompactionService {
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * Context occupancy of a single turn's stored timings, in server-measured
+	 * tokens: `prompt_n + cache_n + predicted_n`. `prompt_n` and `cache_n` are the
+	 * disjoint fresh/cache-reused prompt read; `predicted_n` is the turn's output,
+	 * which becomes prompt on the next request (so it counts toward occupancy).
+	 * Returns `null` when the timings carry none of these counts.
+	 */
+	static occupancyTokens(timings: ChatMessageTimings | undefined): number | null {
+		if (!timings) return null;
+		const { prompt_n, cache_n, predicted_n } = timings;
+		if (prompt_n == null && cache_n == null && predicted_n == null) return null;
+		return (prompt_n ?? 0) + (cache_n ?? 0) + (predicted_n ?? 0);
+	}
+
+	/**
+	 * The deepest ASSISTANT whose stored TOP-LEVEL timings reflect the CURRENT
+	 * context. An assistant ABOVE the latest recap was measured before that fold
+	 * and reads high (it still counts the turns the fold removed), so it is excluded.
+	 *
+	 * Returns undefined when none qualifies (imported, or right after a fold before
+	 * the next send re-measures).
+	 */
+	static latestMeasuredAssistant(branch: DatabaseMessage[]): DatabaseMessage | undefined {
+		// The anchor is the effective recap (the one a send would fold with), not
+		// any recap that happens to have an on-branch parent.
+		const checkpoints = branch.filter((m) => m.type === MessageType.COMPACTION);
+		const byId = checkpoints.length ? new Map(branch.map((m) => [m.id, m])) : undefined;
+		let anchorRecap: DatabaseMessage | undefined;
+		let foldCutoff: number | undefined;
+		if (byId) {
+			const recapById = new Map(checkpoints.map((c) => [c.id, c]));
+			const effective = CompactionService.effectiveRecap(checkpoints, recapById)!;
+			if (effective.parent != null && byId.has(effective.parent)) {
+				anchorRecap = effective;
+			} else {
+				foldCutoff = effective.compaction?.createdAt;
+			}
+		}
+		const belowAnchorRecap = (m: DatabaseMessage): boolean => {
+			if (!anchorRecap || !byId) return true;
+			let cur = m.parent ? byId.get(m.parent) : undefined;
+			while (cur) {
+				if (cur.id === anchorRecap.id) return true;
+				cur = cur.parent ? byId.get(cur.parent) : undefined;
+			}
+			return false;
+		};
+		const pick = (cutoff: number | undefined, useAnchor: boolean): DatabaseMessage | undefined => {
+			for (let i = branch.length - 1; i >= 0; i--) {
+				const m = branch[i];
+				if (m.role !== MessageRole.ASSISTANT) continue;
+				if (CompactionService.occupancyTokens(m.timings) == null) continue;
+				if (cutoff != null && m.timestamp <= cutoff) continue;
+				if (!useAnchor || belowAnchorRecap(m)) return m;
+			}
+			return undefined;
+		};
+		const measured = pick(foldCutoff, true);
+		if (measured) return measured;
+		if (anchorRecap?.compaction?.createdAt != null) {
+			return pick(anchorRecap.compaction.createdAt, false);
+		}
+		return undefined;
+	}
+
+	/**
+	 * Current context occupancy of a resolved branch, in server tokens. Either the
+	 * latest recap's post-fold estimate (`tokensAfter`), or `null` (fresh/imported).
+	 */
+	static currentOccupancy(branch: DatabaseMessage[]): number | null {
+		const measured = CompactionService.latestMeasuredAssistant(branch);
+		if (measured) return CompactionService.occupancyTokens(measured.timings);
+		return CompactionService.latestRecapTokensAfter(branch);
+	}
+
+	/** Post-fold token estimate of the effective recap on the branch, or null. */
+	static latestRecapTokensAfter(branch: DatabaseMessage[]): number | null {
+		const withTokens = branch.filter(
+			(m) => m.type === MessageType.COMPACTION && m.compaction?.tokensAfter != null
+		);
+		if (withTokens.length === 0) return null;
+		const recapById = new Map(
+			branch.filter((m) => m.type === MessageType.COMPACTION).map((c) => [c.id, c] as const)
+		);
+		return CompactionService.effectiveRecap(withTokens, recapById)?.compaction?.tokensAfter ?? null;
+	}
+
+	/**
+	 * Whether occupancy has reached `thresholdPercent` of `nCtx`.
+	 *
+	 * It never fires when either number is unknown or non-positive - e.g.
+	 * `nCtx` is null before `/props` resolves, or `used` is null on a fresh conversation.
+	 */
+	static isOverThreshold(
+		used: number | null,
+		nCtx: number | null,
+		thresholdPercent: number
+	): boolean {
+		if (used == null || nCtx == null || nCtx <= 0) return false;
+		return used / nCtx >= thresholdPercent / 100;
 	}
 }

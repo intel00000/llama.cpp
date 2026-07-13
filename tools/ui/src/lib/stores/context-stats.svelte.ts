@@ -7,29 +7,20 @@
  */
 
 import { MessageRole } from '$lib/enums';
+import { CompactionService } from '$lib/services/compaction.service';
 // direct imports between stores, not via the barrel, to avoid circular deps
 import { agenticStore } from '$lib/stores/agentic.svelte';
 import { chatStore } from '$lib/stores/chat.svelte';
 import { conversationsStore } from '$lib/stores/conversations.svelte';
 import { modelsStore } from '$lib/stores/models.svelte';
 import { serverStore } from '$lib/stores/server.svelte';
-import type { ApiProcessingState, ChatMessageTimings, DatabaseMessage } from '$lib/types';
+import type { ApiProcessingState, DatabaseMessage } from '$lib/types';
 
 interface LiveStats {
 	freshTokens: number;
 	promptTokens: number;
 	cacheTokens: number;
 	outputTokens: number;
-}
-
-function lastAssistantTimings(messages: DatabaseMessage[]): ChatMessageTimings | undefined {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const m = messages[i];
-
-		if (m.role === MessageRole.ASSISTANT && m.timings) return m.timings;
-	}
-
-	return undefined;
 }
 
 function deriveLiveStats(state: ApiProcessingState | null): LiveStats | null {
@@ -69,8 +60,22 @@ class ContextStatsStore {
 
 	private liveStats = $derived(deriveLiveStats(chatStore.activeProcessingState));
 
+	// Recover a recap orphaned off the branch by a fork above it, then resolve the
+	// fold-aware measured assistant ONCE per branch change and share it across
+	// every reading + the occupancy fallback.
+	private recoveredBranch = $derived(
+		CompactionService.withApplicableRecap(
+			conversationsStore.activeMessages as DatabaseMessage[],
+			conversationsStore.activeAllMessages as DatabaseMessage[]
+		)
+	);
+
+	private measured = $derived(CompactionService.latestMeasuredAssistant(this.recoveredBranch));
+
+	private measuredTimings = $derived(this.measured?.timings);
+
 	currentRead = $derived.by(() => {
-		const timings = lastAssistantTimings(conversationsStore.activeMessages as DatabaseMessage[]);
+		const timings = this.measuredTimings;
 
 		let read = 0;
 
@@ -88,14 +93,14 @@ class ContextStatsStore {
 	});
 
 	currentFresh = $derived.by(() => {
-		const timings = lastAssistantTimings(conversationsStore.activeMessages as DatabaseMessage[]);
+		const timings = this.measuredTimings;
 		const fresh = timings?.prompt_n ?? 0;
 
 		return Math.max(fresh, this.liveStats?.freshTokens ?? 0);
 	});
 
 	currentCache = $derived.by(() => {
-		const timings = lastAssistantTimings(conversationsStore.activeMessages as DatabaseMessage[]);
+		const timings = this.measuredTimings;
 		const cached = timings?.cache_n ?? 0;
 
 		if (this.liveStats && this.liveStats.promptTokens > 0) {
@@ -108,14 +113,25 @@ class ContextStatsStore {
 	currentOutput = $derived.by(() => {
 		if (this.liveStats && this.liveStats.outputTokens > 0) return this.liveStats.outputTokens;
 
-		const timings = lastAssistantTimings(conversationsStore.activeMessages as DatabaseMessage[]);
+		const timings = this.measuredTimings;
 
 		return timings?.predicted_n ?? 0;
 	});
 
 	kvTotal = $derived(this.currentRead + this.currentOutput);
 
-	contextUsed = $derived(this.currentRead + this.currentOutput);
+	// Fold-aware occupancy from the SAME shared measured assistant.
+	private postFoldOccupancy = $derived(
+		this.measured
+			? CompactionService.occupancyTokens(this.measured.timings)
+			: CompactionService.latestRecapTokensAfter(this.recoveredBranch)
+	);
+
+	contextUsed = $derived(
+		this.liveStats
+			? this.currentRead + this.currentOutput
+			: (this.postFoldOccupancy ?? this.currentRead + this.currentOutput)
+	);
 
 	contextAvailable = $derived(
 		this.contextTotal !== null ? this.contextTotal - this.contextUsed : null
