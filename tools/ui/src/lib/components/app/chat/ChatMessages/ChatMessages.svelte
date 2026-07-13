@@ -1,10 +1,12 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { SvelteSet } from 'svelte/reactivity';
 	import { beforeNavigate, afterNavigate } from '$app/navigation';
 	import { ChatMessage, ChatMessageUserPending } from '$lib/components/app';
 	import { setChatActionsContext } from '$lib/contexts';
 	import { MessageRole, MessageType } from '$lib/enums';
 	import { chatStore } from '$lib/stores/chat.svelte';
+	import { CompactionService } from '$lib/services';
 	import {
 		chatPendingMessageContent,
 		chatPendingMessageExtras,
@@ -38,6 +40,35 @@
 	let isVisible = $state(false);
 	let previousConversationId = $state<string | null>(null);
 	let previousRouteId = $state<string | null>(null);
+
+	// Recap nodes whose folded original messages are currently revealed inline.
+	const expandedRecaps = new SvelteSet<string>();
+	function toggleRecap(recapId: string) {
+		if (expandedRecaps.has(recapId)) expandedRecaps.delete(recapId);
+		else expandedRecaps.add(recapId);
+	}
+
+	// The transcript must fold exactly what a send folds: recover applicable
+	// off-branch recaps (edit/regenerate forks above a fold orphan them) and
+	// re-sort so the divider lands at its fold point.
+	const displaySource = $derived.by(() => {
+		const recovered = CompactionService.withApplicableRecap(messages, allConversationMessages);
+		if (recovered === messages) return messages;
+		return [...recovered].sort((a, b) => {
+			if (a.role === MessageRole.SYSTEM && b.role !== MessageRole.SYSTEM) return -1;
+			if (a.role !== MessageRole.SYSTEM && b.role === MessageRole.SYSTEM) return 1;
+			return a.timestamp - b.timestamp;
+		});
+	});
+
+	// When a NEWER recap appears that folds an already-expanded recap, collapse that nested
+	// recap so it re-appears as a divider rather than staying auto-revealed.
+	let knownRecapIds = new Set<string>();
+	$effect(() => {
+		const recaps = displaySource.filter((m) => m.type === MessageType.COMPACTION);
+		if (recaps.some((r) => !knownRecapIds.has(r.id))) expandedRecaps.clear();
+		knownRecapIds = new Set(recaps.map((r) => r.id));
+	});
 
 	const currentConfig = config();
 
@@ -130,6 +161,7 @@
 
 		if (currentId !== previousConversationId && previousConversationId !== null) {
 			// Conversation changed - trigger fade out/in
+			expandedRecaps.clear(); // recap reveal state is per-conversation
 			isVisible = false;
 			requestAnimationFrame(() => {
 				refreshAllMessages();
@@ -176,9 +208,26 @@
 			return [];
 		}
 
-		const filteredMessages = currentConfig.showSystemMessage
-			? messages
-			: messages.filter((msg) => msg.type !== MessageRole.SYSTEM);
+		// Hide messages folded into a recap.
+		// A recap hides its folded members unless it is itself still visible AND expanded.
+		const recaps = displaySource
+			.filter((m) => m.type === MessageType.COMPACTION)
+			.sort((a, b) => b.timestamp - a.timestamp);
+		// Transient and read-only below. plain Set avoids SvelteSet's per-op signal cost.
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
+		const foldedIds = new Set<string>();
+		for (const r of recaps) {
+			if (!foldedIds.has(r.id) && expandedRecaps.has(r.id)) continue;
+			for (const id of r.compaction?.summarizedMessageIds ?? []) foldedIds.add(id);
+		}
+		// Single pass: drop folded messages and (unless shown) system messages.
+		const showSystem = currentConfig.showSystemMessage;
+		const filteredMessages =
+			foldedIds.size === 0 && showSystem
+				? displaySource
+				: displaySource.filter(
+						(m) => !foldedIds.has(m.id) && (showSystem || m.type !== MessageRole.SYSTEM)
+					);
 
 		// Build display entries, grouping agentic sessions into single entries.
 		// An agentic session = assistant(with tool_calls) → tool → assistant → tool → ... → assistant(final)
@@ -295,6 +344,8 @@
 			{isLastUserMessage}
 			{nextAssistantMessage}
 			{siblingInfo}
+			recapExpanded={expandedRecaps.has(message.id)}
+			onToggleRecap={() => toggleRecap(message.id)}
 		/>
 	{/each}
 

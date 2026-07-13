@@ -28,6 +28,8 @@
 		isLastUserMessage?: boolean;
 		nextAssistantMessage?: DatabaseMessage | null;
 		siblingInfo?: ChatMessageSiblingInfo | null;
+		recapExpanded?: boolean;
+		onToggleRecap?: () => void;
 	}
 
 	let {
@@ -37,7 +39,9 @@
 		isLastAssistantMessage = false,
 		isLastUserMessage = false,
 		nextAssistantMessage = null,
-		siblingInfo = null
+		siblingInfo = null,
+		recapExpanded = false,
+		onToggleRecap
 	}: Props = $props();
 
 	const chatActions = getChatActionsContext();
@@ -331,7 +335,12 @@
 
 <div use:fadeInView class="chat-message">
 	{#if message.type === MessageType.COMPACTION}
-		<ChatMessageCompaction class={className} {message} />
+		<ChatMessageCompaction
+			class={className}
+			{message}
+			foldedExpanded={recapExpanded}
+			onToggleFolded={onToggleRecap}
+		/>
 	{:else if message.role === MessageRole.SYSTEM}
 		<ChatMessageSystem
 			bind:textareaElement

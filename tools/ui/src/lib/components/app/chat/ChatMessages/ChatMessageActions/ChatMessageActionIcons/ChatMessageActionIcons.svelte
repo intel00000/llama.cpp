@@ -132,7 +132,7 @@
 	bind:open={showDeleteDialog}
 	title="Delete Message"
 	description={deletionInfo && deletionInfo.totalCount > 1
-		? `This will delete ${deletionInfo.totalCount} messages including: ${deletionInfo.userMessages} user message${deletionInfo.userMessages > 1 ? 's' : ''} and ${deletionInfo.assistantMessages} assistant response${deletionInfo.assistantMessages > 1 ? 's' : ''}. All messages in this branch and their responses will be permanently removed. This action cannot be undone.`
+		? `This will delete ${deletionInfo.totalCount} messages including: ${deletionInfo.userMessages} user message${deletionInfo.userMessages > 1 ? 's' : ''} and ${deletionInfo.assistantMessages} assistant response${deletionInfo.assistantMessages > 1 ? 's' : ''}.${deletionInfo.messageTypes.includes('conversation summary') ? (deletionInfo.messageTypes.includes('folded history') ? ' This branch also contains a conversation summary - deleting it removes the summarized history and every newer turn on this branch.' : ' This branch also contains a conversation summary - deleting it removes the summary; the older turns it folded are not deleted and will re-appear in the conversation.') : ''} All messages in this branch and their responses will be permanently removed. This action cannot be undone.`
 		: 'Are you sure you want to delete this message? This action cannot be undone.'}
 	confirmText={deletionInfo && deletionInfo.totalCount > 1
 		? `Delete ${deletionInfo.totalCount} Messages`
