@@ -15,6 +15,8 @@ import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import { DatabaseService } from '$lib/services/database.service';
 import { ChatService } from '$lib/services/chat.service';
 import { CompactionService } from '$lib/services/compaction.service';
+import { COMPACTION } from '$lib/constants/compaction';
+import { SETTINGS_KEYS } from '$lib/constants/settings-keys';
 import { streamIdentity } from '$lib/utils/stream-identity';
 import { getAuthHeaders } from '$lib/utils/api-headers';
 import { conversationsStore } from '$lib/stores/conversations.svelte';
@@ -96,6 +98,8 @@ class ChatStore {
 	// in-flight discoverActiveStream guard, keyed by conv id
 	private discoveringConvs = new SvelteSet<string>();
 	private abortControllers = new SvelteMap<string, AbortController>();
+	/** Conversations with a compaction in flight (single-flight guard + UI hint). */
+	private compactingConversations = new SvelteSet<string>();
 	private preEncodeAbortController: AbortController | null = null;
 	private processingStates = new SvelteMap<string, ApiProcessingState | null>();
 	private conversationStateTimestamps = new SvelteMap<string, ConversationStateEntry>();
@@ -2287,6 +2291,194 @@ class ChatStore {
 		}
 
 		return null;
+	}
+
+	/** Reads compaction settings off the config with defaults. */
+	private getCompactionSettings(): {
+		auto: boolean;
+		threshold: number;
+		retain: number;
+		summaryMaxTokens: number;
+		prompt: string;
+	} {
+		const c = config() as Record<string, unknown>;
+		const num = (key: string, fallback: number): number => {
+			const n = Number(c[key]);
+			return Number.isFinite(n) && n > 0 ? n : fallback;
+		};
+		const prompt = c[SETTINGS_KEYS.COMPACTION_PROMPT];
+		return {
+			auto: Boolean(c[SETTINGS_KEYS.COMPACTION_AUTO]),
+			threshold: num(SETTINGS_KEYS.COMPACTION_THRESHOLD, COMPACTION.DEFAULT_THRESHOLD),
+			retain: num(SETTINGS_KEYS.COMPACTION_RETAIN, COMPACTION.DEFAULT_RETAIN),
+			summaryMaxTokens: num(
+				SETTINGS_KEYS.COMPACTION_SUMMARY_MAX_TOKENS,
+				COMPACTION.DEFAULT_SUMMARY_MAX_TOKENS
+			),
+			prompt: typeof prompt === 'string' && prompt.trim() ? prompt : COMPACTION.DEFAULT_PROMPT
+		};
+	}
+
+	/**
+	 * Summarize a conversation's older turns into a recap checkpoint node. Folds only
+	 * whole resolved turns (never the current one), summarizes them via the chat
+	 * model, and persists the recap as a strict linear child of the current leaf, at
+	 * the fold point.
+	 *
+	 * Single-flight per conversation; every step is bound to `conversationId` and
+	 * honors `signal`. `trigger` other than 'manual' forces progress so an estimate
+	 * error cannot cause a wrong no-op.
+	 *
+	 * A benign no-op (e.g. nothing older to fold, or the recap would not reduce the
+	 * context) returns `{ compacted: false, reason }` and is not an error.
+	 */
+	async compactConversation(
+		conversationId: string,
+		trigger: 'manual' | 'auto' | 'overflow',
+		signal?: AbortSignal
+	): Promise<{ compacted: boolean; reason?: string }> {
+		// Set the guard synchronously before any await - no check-then-set TOCTOU.
+		if (this.compactingConversations.has(conversationId)) {
+			return { compacted: false, reason: 'Already compacting.' };
+		}
+		this.compactingConversations.add(conversationId);
+		// Hold the conversation "loading" across the summary so a concurrent send
+		// cannot start a second stream, release it in finally if we set it.
+		const wasLoading = this.chatLoadingStates.has(conversationId);
+		this.setChatLoading(conversationId, true);
+		try {
+			const conv = conversationsStore.activeConversation;
+			if (!conv || conv.id !== conversationId) {
+				return { compacted: false, reason: 'Conversation is not active.' };
+			}
+			const leaf = conv.currNode ?? '';
+			const nCtx = this.getContextTotal();
+			if (!nCtx) return { compacted: false, reason: 'Context size is unknown.' };
+
+			const allMessages = await conversationsStore.getConversationMessages(conversationId);
+			if (signal?.aborted) return { compacted: false, reason: 'Aborted.' };
+			// Recover a recap orphaned off this branch before planning.
+			const branch = CompactionService.withApplicableRecap(
+				filterByLeafNodeId(allMessages, leaf, false) as DatabaseMessage[],
+				allMessages
+			);
+			const collapsed = CompactionService.collapseForSend(branch);
+
+			const settings = this.getCompactionSettings();
+			const plan = CompactionService.planCompaction(
+				collapsed,
+				nCtx,
+				settings.retain,
+				trigger !== 'manual'
+			);
+			if (!plan.fold) return { compacted: false, reason: plan.reason };
+
+			// Summarize the folded turns, sent as-is so their images/tools are seen. In
+			// single-model mode leave `model` unset (matches the send path and keeps the
+			// vision gate from stripping folded images). Router mode mirrors the send
+			// path's priority: picker selection first, then the branch's last model.
+			const summaryModel = isRouterMode()
+				? selectedModelName() || (this.getConversationModel(branch) ?? undefined)
+				: undefined;
+			const converted = await Promise.all(
+				CompactionService.mergeRecapIntoNextUser(plan.foldMessages).map((m) =>
+					ChatService.convertDbMessageToApiChatMessageData(m)
+				)
+			);
+			const input: ApiChatMessageData[] = [
+				...converted,
+				{ role: MessageRole.USER, content: settings.prompt }
+			];
+
+			let summary = '';
+			let summaryTimings: ChatMessageTimings | undefined;
+			try {
+				await ChatService.sendMessage(
+					input,
+					{
+						stream: true,
+						model: summaryModel,
+						max_tokens: settings.summaryMaxTokens,
+						custom: { chat_template_kwargs: { enable_thinking: false } },
+						onChunk: (chunk: string) => {
+							summary += chunk;
+						},
+						onTimings: (t?: ChatMessageTimings) => {
+							if (t) summaryTimings = t;
+						}
+					},
+					undefined,
+					signal
+				);
+			} catch (error) {
+				if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
+					return { compacted: false, reason: 'Aborted.' };
+				}
+				throw error;
+			}
+
+			if (signal?.aborted) return { compacted: false, reason: 'Aborted.' };
+			summary = summary.trim();
+			if (!summary) return { compacted: false, reason: 'Empty summary.' };
+
+			// Anti-thrash from the summary request's OWN server timings:
+			//  - prompt_n + cache_n = the folded input the server read
+			//  - predicted_n = the recap's real size.
+			//
+			// If the recap is not smaller than what it replaces, do not compact.
+			const foldedSize = summaryTimings
+				? (summaryTimings.prompt_n ?? 0) + (summaryTimings.cache_n ?? 0)
+				: null;
+			const recapSize = summaryTimings?.predicted_n ?? 0;
+			if (foldedSize != null && recapSize > 0 && recapSize >= foldedSize) {
+				return { compacted: false, reason: 'Compaction would not reduce the context.' };
+			}
+
+			const tokensBefore = CompactionService.currentOccupancy(branch) ?? 0;
+			const tokensAfter =
+				foldedSize != null ? Math.max(0, tokensBefore - foldedSize + recapSize) : tokensBefore;
+
+			// Persist the recap between the folded region and the retained tail as a
+			// linear child of the current leaf. collapseForSend prepends it regardless
+			// of tree position.
+			const foldLast = plan.foldMessages[plan.foldMessages.length - 1];
+			const keepFirst = plan.keepMessages[0];
+			const mid = Math.floor((foldLast.timestamp + keepFirst.timestamp) / 2);
+			const recapTs =
+				mid > foldLast.timestamp && mid < keepFirst.timestamp ? mid : keepFirst.timestamp;
+
+			await DatabaseService.createMessageBranch(
+				{
+					convId: conversationId,
+					type: MessageType.COMPACTION,
+					role: MessageRole.USER,
+					content: CompactionService.formatRecap(summary),
+					timestamp: recapTs,
+					toolCalls: '',
+					children: [],
+					compaction: {
+						// Record the fold's transitive coverage, not just the direct fold ids.
+						summarizedMessageIds: CompactionService.transitiveFoldIds(
+							plan.foldMessages,
+							allMessages
+						),
+						tokensBefore,
+						tokensAfter,
+						createdAt: Date.now()
+					}
+				},
+				leaf
+			);
+
+			// Reflect the new recap in the active view (if still in this conversation).
+			if (conversationsStore.activeConversation?.id === conversationId) {
+				await conversationsStore.refreshActiveMessages();
+			}
+			return { compacted: true };
+		} finally {
+			this.compactingConversations.delete(conversationId);
+			if (!wasLoading) this.setChatLoading(conversationId, false);
+		}
 	}
 
 	updateProcessingStateFromTimings(

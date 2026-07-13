@@ -61,6 +61,12 @@ export const SETTINGS_KEYS = {
 	MCP_REQUEST_TIMEOUT_SECONDS: 'mcpRequestTimeoutSeconds',
 	AGENTIC_MAX_TURNS: 'agenticMaxTurns',
 	SHOW_TOOL_CALL_IN_PROGRESS: 'showToolCallInProgress',
+	// Context / Compaction
+	COMPACTION_AUTO: 'compactionAuto',
+	COMPACTION_THRESHOLD: 'compactionThreshold',
+	COMPACTION_RETAIN: 'compactionRetain',
+	COMPACTION_SUMMARY_MAX_TOKENS: 'compactionSummaryMaxTokens',
+	COMPACTION_PROMPT: 'compactionPrompt',
 	// Performance
 	PRE_ENCODE_CONVERSATION: 'preEncodeConversation',
 	// Developer
