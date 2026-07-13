@@ -12,8 +12,10 @@
 	} from '$lib/components/app/settings';
 	import { Button } from '$lib/components/ui/button';
 	import {
+		COMPACTION,
 		NUMERIC_FIELDS,
 		POSITIVE_INTEGER_FIELDS,
+		SETTINGS_KEYS,
 		SETTINGS_CHAT_SECTIONS,
 		SETTINGS_SECTION_TITLES
 	} from '$lib/constants';
@@ -112,6 +114,19 @@
 					return;
 				}
 			}
+		}
+
+		// Cap the threshold at 100% and keep retain strictly below it.
+		const thr = processedConfig[SETTINGS_KEYS.COMPACTION_THRESHOLD];
+		if (thr !== undefined && thr !== '') {
+			processedConfig[SETTINGS_KEYS.COMPACTION_THRESHOLD] = Math.min(100, Number(thr));
+		}
+		const ret = processedConfig[SETTINGS_KEYS.COMPACTION_RETAIN];
+		if (ret !== undefined && ret !== '') {
+			const effectiveThreshold =
+				Number(processedConfig[SETTINGS_KEYS.COMPACTION_THRESHOLD]) || COMPACTION.DEFAULT_THRESHOLD;
+			const cap = effectiveThreshold - 1;
+			processedConfig[SETTINGS_KEYS.COMPACTION_RETAIN] = Math.max(1, Math.min(Number(ret), cap));
 		}
 
 		settingsStore.updateMultipleConfig(processedConfig);

@@ -13,6 +13,7 @@ export const URL_PARAMS = {
 /** Settings section slugs — used for routes and navigation. */
 export const SETTINGS_SECTION_SLUGS = {
 	AGENTIC: 'agentic',
+	CONTEXT: 'context',
 	DEVELOPER: 'developer',
 	DISPLAY: 'display',
 	GENERAL: 'general',

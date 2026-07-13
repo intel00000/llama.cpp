@@ -1,12 +1,14 @@
 import { CLI_FLAGS } from './cli-flags.constants';
 import { DEFAULT_MCP_CONFIG } from './mcp.constants';
 import { ROUTES, SETTINGS_SECTION_SLUGS } from './routes.constants';
+import { COMPACTION } from './compaction.constants';
 import { SETTINGS_KEYS } from './settings-keys.constants';
 import { TITLE_GENERATION } from './title-generation.constants';
 import { FILE_GLOB_SEARCH_PICKERS } from './working-directory.constants';
 import {
 	AlertTriangle,
 	Code,
+	Combine,
 	Database,
 	Funnel,
 	ListRestart,
@@ -31,6 +33,7 @@ import type { Component } from 'svelte';
 
 export const SETTINGS_SECTION_TITLES = {
 	AGENTIC: 'Agentic',
+	CONTEXT: 'Context',
 	DEVELOPER: 'Developer',
 	DISPLAY: 'Display',
 	GENERAL: 'General',
@@ -116,6 +119,56 @@ const SETTINGS_REGISTRY: Record<string, SettingsSectionEntry> = {
 		],
 		slug: SETTINGS_SECTION_SLUGS.AGENTIC,
 		title: SETTINGS_SECTION_TITLES.AGENTIC
+	},
+	[SETTINGS_SECTION_SLUGS.CONTEXT]: {
+		title: SETTINGS_SECTION_TITLES.CONTEXT,
+		slug: SETTINGS_SECTION_SLUGS.CONTEXT,
+		icon: Combine,
+		settings: [
+			{
+				key: SETTINGS_KEYS.COMPACTION_AUTO,
+				label: 'Automatic compaction',
+				help: 'When the conversation passes the threshold below, summarize older turns into a recap so it keeps fitting the model context. When off, compaction only runs when you trigger it or on a context overflow.',
+				defaultValue: false,
+				type: SettingsFieldType.CHECKBOX,
+				section: SETTINGS_SECTION_SLUGS.CONTEXT
+			},
+			{
+				key: SETTINGS_KEYS.COMPACTION_THRESHOLD,
+				label: 'Compaction threshold (%)',
+				help: 'Context occupancy, as a percent (1-100) of the model context size, at which automatic compaction triggers.',
+				defaultValue: COMPACTION.DEFAULT_THRESHOLD,
+				type: SettingsFieldType.INPUT,
+				section: SETTINGS_SECTION_SLUGS.CONTEXT,
+				isPositiveInteger: true
+			},
+			{
+				key: SETTINGS_KEYS.COMPACTION_RETAIN,
+				label: 'Retain recent (%)',
+				help: 'Percent of the model context kept as recent turns verbatim after compaction; older turns are folded into the recap. Keep this well below the threshold.',
+				defaultValue: COMPACTION.DEFAULT_RETAIN,
+				type: SettingsFieldType.INPUT,
+				section: SETTINGS_SECTION_SLUGS.CONTEXT,
+				isPositiveInteger: true
+			},
+			{
+				key: SETTINGS_KEYS.COMPACTION_SUMMARY_MAX_TOKENS,
+				label: 'Summary max length (tokens)',
+				help: 'Maximum number of tokens the recap summary itself may generate. Lower values keep the recap terse; raise it for long conversations that need a more detailed summary.',
+				defaultValue: COMPACTION.DEFAULT_SUMMARY_MAX_TOKENS,
+				type: SettingsFieldType.INPUT,
+				section: SETTINGS_SECTION_SLUGS.CONTEXT,
+				isPositiveInteger: true
+			},
+			{
+				key: SETTINGS_KEYS.COMPACTION_PROMPT,
+				label: 'Compaction prompt',
+				help: 'Instruction used to summarize the folded turns into the recap.',
+				defaultValue: COMPACTION.DEFAULT_PROMPT,
+				type: SettingsFieldType.TEXTAREA,
+				section: SETTINGS_SECTION_SLUGS.CONTEXT
+			}
+		]
 	},
 	[SETTINGS_SECTION_SLUGS.DEVELOPER]: {
 		icon: Code,
