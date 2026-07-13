@@ -493,13 +493,23 @@ export class DatabaseService {
 						.filter((childId: string) => idMap.has(childId))
 						.map((childId: string) => idMap.get(childId)!);
 
+					const newCompaction = msg.compaction
+						? {
+								...msg.compaction,
+								summarizedMessageIds: msg.compaction.summarizedMessageIds
+									.map((id: string) => idMap.get(id))
+									.filter((id: string | undefined): id is string => id !== undefined)
+							}
+						: undefined;
+
 					return {
 						...msg,
 						id: newId,
 						convId: newConvId,
 						parent: newParent,
 						children: newChildren,
-						extra: options.includeAttachments ? msg.extra : undefined
+						extra: options.includeAttachments ? msg.extra : undefined,
+						...(newCompaction ? { compaction: newCompaction } : {})
 					};
 				});
 

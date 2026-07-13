@@ -99,6 +99,19 @@ export type DatabaseMessageExtra =
 	| DatabaseMessageExtraMcpResource
 	| DatabaseMessageExtraLegacyContext;
 
+/**
+ * Metadata carried by a `type: 'compaction'` recap node: which older turns it
+ * folded, and the server-token occupancy before/after (used for the anti-thrash
+ * guard and the divider UI). All counts are server-measured tokens.
+ */
+export interface CompactionMetadata {
+	/** ids of the messages this recap replaced (excluded from future sends) */
+	summarizedMessageIds: string[];
+	tokensBefore: number;
+	tokensAfter: number;
+	createdAt?: number;
+}
+
 export interface DatabaseMessage {
 	id: string;
 	convId: string;
@@ -123,6 +136,7 @@ export interface DatabaseMessage {
 	extra?: DatabaseMessageExtra[];
 	timings?: ChatMessageTimings;
 	model?: string;
+	compaction?: CompactionMetadata;
 }
 
 export type ExportedConversation = {

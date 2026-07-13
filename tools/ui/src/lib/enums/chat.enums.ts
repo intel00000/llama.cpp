@@ -45,7 +45,8 @@ export enum MessageType {
 	ROOT = 'root',
 	TEXT = 'text',
 	THINK = 'think',
-	SYSTEM = 'system'
+	SYSTEM = 'system',
+	COMPACTION = 'compaction'
 }
 
 /**
