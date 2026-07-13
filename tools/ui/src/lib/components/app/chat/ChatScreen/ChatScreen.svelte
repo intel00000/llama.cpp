@@ -6,6 +6,7 @@
 	import {
 		ChatMessages,
 		ChatScreenDragOverlay,
+		ChatScreenCompactionStatus,
 		ChatScreenForm,
 		ChatScreenServerError,
 		ChatScreenStreamResumeStatus,
@@ -334,6 +335,8 @@
 			{#if page.params.id}
 				<ChatScreenStreamResumeStatus />
 			{/if}
+
+			<ChatScreenCompactionStatus />
 
 			<div class="pointer-events-none flex flex-col gap-6 items-center w-full">
 				{#if (deviceStore.isMobile ? mobileScrollDownHint || isMobileUserScrolledUp : autoScroll.userScrolledUp) && page.url.hash.includes(ROUTES.CHAT) && page.params.id}

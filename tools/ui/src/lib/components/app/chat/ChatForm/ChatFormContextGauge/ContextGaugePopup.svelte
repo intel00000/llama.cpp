@@ -1,4 +1,7 @@
 <script lang="ts">
+	import { Combine } from '@lucide/svelte';
+	import { toast } from 'svelte-sonner';
+	import { chatStore, conversationsStore } from '$lib/stores';
 	import { colorLevelBgClass, colorLevelTextClass } from './context-gauge';
 	import ContextGaugeDetails from './ContextGaugeDetails.svelte';
 	import ContextGaugeLoadModel from './ContextGaugeLoadModel.svelte';
@@ -12,6 +15,20 @@
 	import { formatParameters } from '$lib/utils/formatters';
 
 	const gauge = useContextGauge();
+
+	async function handleCompact() {
+		const conv = conversationsStore.activeConversation;
+		if (!conv) return;
+		try {
+			const result = await chatStore.compactConversation(conv.id, 'manual');
+			if (result.compacted) toast.success('Conversation compacted');
+			else if (result.reason) toast.info(result.reason);
+		} catch (error) {
+			// rethrows non-abort errors (server error).
+			console.error('Manual compaction failed:', error);
+			toast.error('Compaction failed. Please try again.');
+		}
+	}
 
 	// The gauge hook wraps a processing state instance that only follows the
 	// live stream while its own monitoring flag is set, so the card instance
@@ -112,6 +129,23 @@
 					averageTokensPerSecond={gauge.averageTokensPerSecond}
 					transientDetails={gauge.transientDetails}
 				/>
+			{/if}
+
+			<!-- Imported conversations have no usage yet and need manual compaction to
+			     get within budget before the first send, so gate on turns too. -->
+			{#if conversationsStore.activeConversation && (gauge.hasAnyUsage || conversationsStore.activeMessages.length > 1)}
+				{@const convId = conversationsStore.activeConversation!.id}
+				<button
+					type="button"
+					class="mt-1 flex items-center justify-center gap-1.5 rounded-md border border-border/50 px-2 py-1 text-xs transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+					disabled={chatStore.isLoading ||
+						chatStore.isStreaming() ||
+						chatStore.isCompacting(convId)}
+					onclick={handleCompact}
+				>
+					<Combine class="h-3 w-3" />
+					<span>{chatStore.isCompacting(convId) ? 'Compacting...' : 'Compact now'}</span>
+				</button>
 			{/if}
 		</div>
 	</div>

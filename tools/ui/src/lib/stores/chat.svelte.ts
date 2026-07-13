@@ -2726,6 +2726,11 @@ class ChatStore {
 		};
 	}
 
+	/** Whether a compaction is currently in flight for this conversation. */
+	isCompacting(conversationId: string): boolean {
+		return this.compactingConversations.has(conversationId);
+	}
+
 	/**
 	 * Summarize a conversation's older turns into a recap checkpoint node. Folds only
 	 * whole resolved turns (never the current one), summarizes them via the chat
@@ -2797,6 +2802,7 @@ class ChatStore {
 				{ role: MessageRole.USER, content: settings.prompt }
 			];
 
+			signal ??= this.getOrCreateAbortController(conversationId).signal;
 			let summary = '';
 			let summaryTimings: ChatMessageTimings | undefined;
 			try {
@@ -2885,6 +2891,10 @@ class ChatStore {
 		} finally {
 			this.compactingConversations.delete(conversationId);
 			if (!wasLoading) this.setChatLoading(conversationId, false);
+			if (trigger === 'manual' && conversationsStore.activeConversation?.id === conversationId) {
+				const pending = this.consumePendingMessage(conversationId);
+				if (pending) void this.sendMessage(pending.content, pending.extras);
+			}
 		}
 	}
 
