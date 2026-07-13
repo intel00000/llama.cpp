@@ -7,6 +7,7 @@ export const SETTINGS_SECTION_SLUGS = {
 	SAMPLING: 'sampling',
 	PENALTIES: 'penalties',
 	AGENTIC: 'agentic',
+	CONTEXT: 'context',
 	DEVELOPER: 'developer',
 	TOOLS: 'tools',
 	IMPORT_EXPORT: 'import-export'

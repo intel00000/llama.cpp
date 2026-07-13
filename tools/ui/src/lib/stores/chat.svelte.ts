@@ -2320,10 +2320,18 @@ class ChatStore {
 			return Number.isFinite(n) && n > 0 ? n : fallback;
 		};
 		const prompt = c[SETTINGS_KEYS.COMPACTION_PROMPT];
+		const threshold = Math.min(
+			100,
+			num(SETTINGS_KEYS.COMPACTION_THRESHOLD, COMPACTION.DEFAULT_THRESHOLD)
+		);
+		const retain = Math.max(
+			1,
+			Math.min(num(SETTINGS_KEYS.COMPACTION_RETAIN, COMPACTION.DEFAULT_RETAIN), threshold - 1)
+		);
 		return {
 			auto: Boolean(c[SETTINGS_KEYS.COMPACTION_AUTO]),
-			threshold: num(SETTINGS_KEYS.COMPACTION_THRESHOLD, COMPACTION.DEFAULT_THRESHOLD),
-			retain: num(SETTINGS_KEYS.COMPACTION_RETAIN, COMPACTION.DEFAULT_RETAIN),
+			threshold,
+			retain,
 			summaryMaxTokens: num(
 				SETTINGS_KEYS.COMPACTION_SUMMARY_MAX_TOKENS,
 				COMPACTION.DEFAULT_SUMMARY_MAX_TOKENS

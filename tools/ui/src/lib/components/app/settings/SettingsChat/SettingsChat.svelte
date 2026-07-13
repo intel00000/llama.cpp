@@ -15,6 +15,8 @@
 		SETTINGS_SECTION_TITLES
 	} from '$lib/constants';
 	import type { SettingsSection } from '$lib/types';
+	import { SETTINGS_KEYS } from '$lib/constants/settings-keys';
+	import { COMPACTION } from '$lib/constants/compaction';
 	import { RouterService } from '$lib/services/router.service';
 	import { setMode } from 'mode-watcher';
 	import { ColorMode } from '$lib/enums/ui.enums';
@@ -107,6 +109,19 @@
 					return;
 				}
 			}
+		}
+
+		// Cap the threshold at 100% and keep retain strictly below it.
+		const thr = processedConfig[SETTINGS_KEYS.COMPACTION_THRESHOLD];
+		if (thr !== undefined && thr !== '') {
+			processedConfig[SETTINGS_KEYS.COMPACTION_THRESHOLD] = Math.min(100, Number(thr));
+		}
+		const ret = processedConfig[SETTINGS_KEYS.COMPACTION_RETAIN];
+		if (ret !== undefined && ret !== '') {
+			const effectiveThreshold =
+				Number(processedConfig[SETTINGS_KEYS.COMPACTION_THRESHOLD]) || COMPACTION.DEFAULT_THRESHOLD;
+			const cap = effectiveThreshold - 1;
+			processedConfig[SETTINGS_KEYS.COMPACTION_RETAIN] = Math.max(1, Math.min(Number(ret), cap));
 		}
 
 		settingsStore.updateMultipleConfig(processedConfig);
