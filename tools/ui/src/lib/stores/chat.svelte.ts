@@ -28,6 +28,7 @@ import {
 	StreamConnectionState
 } from '$lib/enums';
 import { ChatService } from '$lib/services/chat.service';
+import { CompactionService } from '$lib/services/compaction.service';
 import { DatabaseService } from '$lib/services/database.service';
 // direct imports between stores, not via the barrel, to avoid circular deps
 import { agenticStore } from '$lib/stores/agentic.svelte';
@@ -1282,6 +1283,24 @@ class ChatStore {
 		modelOverride?: string | null,
 		firstUserMessageContent?: string
 	): Promise<void> {
+		// Collapse any compaction recap node(s) on the branch into
+		// system -> recap -> retained tail so the folded turns are replaced by the
+		// recap. Reassigned early (before model resolution and streaming) so all
+		// consumers receive the same context.
+		//
+		// If the branch carries no recap of its own, one may still be orphaned off it
+		// (an edit/regenerate fork above the recap, or overflow recovery). An on-branch
+		// recap can also reference folded ids that are off-branch (a nested recap
+		// stranded by a fork, or a recap recorded before transitive coverage). Either
+		// way, read the full tree and recover.
+		if (CompactionService.needsRecapRecovery(allMessages)) {
+			const full = await conversationsStore.getConversationMessages(assistantMessage.convId);
+			allMessages = CompactionService.withApplicableRecap(allMessages, full);
+		}
+		allMessages = CompactionService.mergeRecapIntoNextUser(
+			CompactionService.collapseForSend(allMessages)
+		);
+
 		// the ::model suffix in the stream identity is only for router mode, where it routes to the
 		// owning child. in single-model mode the identity stays the bare conv id so that attach, stop
 		// and reattach all agree, regardless of fresh send vs regenerate passing a resolved model
@@ -2017,11 +2036,10 @@ class ChatStore {
 			await conversationsStore.updateCurrentNode(newAssistantMessage.id);
 			conversationsStore.updateConversationTimestamp();
 			await conversationsStore.refreshActiveMessages();
-			const conversationPath = filterByLeafNodeId(
-				allMessages,
-				parentMessage.id,
-				false
-			) as DatabaseMessage[];
+			const conversationPath = CompactionService.withApplicableRecap(
+				filterByLeafNodeId(allMessages, parentMessage.id, false) as DatabaseMessage[],
+				allMessages
+			);
 			const modelToUse = modelOverride || msg.model || undefined;
 
 			await this.streamChatCompletion(
@@ -2189,12 +2207,10 @@ class ChatStore {
 			await conversationsStore.updateCurrentNode(newAssistantMessage.id);
 			conversationsStore.updateConversationTimestamp();
 			await conversationsStore.refreshActiveMessages();
-			const conversationPath = filterByLeafNodeId(
-				allMessages,
-				anchorMessage.id,
-				false
-			) as DatabaseMessage[];
-
+			const conversationPath = CompactionService.withApplicableRecap(
+				filterByLeafNodeId(allMessages, anchorMessage.id, false) as DatabaseMessage[],
+				allMessages
+			);
 			await this.streamChatCompletion(conversationPath, newAssistantMessage);
 		} catch (error) {
 			if (!isAbortError(error)) console.error('Failed to continue agentic turn:', error);
@@ -2247,7 +2263,16 @@ class ChatStore {
 			// internal converter preserves tool_calls and extras when present.
 			// Reconstructing a bare {role, content} here would drop those fields
 			// and break continue_final_message for messages with tool calls.
-			const contextWithContinue = conversationsStore.activeMessages.slice(0, idx + 1);
+			const contextWithContinue = CompactionService.mergeRecapIntoNextUser(
+				CompactionService.collapseForSend(
+					// This continue path posts directly to ChatService.sendMessage, bypassing
+					// streamChatCompletion's collapse, so fold here.
+					CompactionService.withApplicableRecap(
+						conversationsStore.activeMessages.slice(0, idx + 1),
+						allMessages
+					)
+				)
+			);
 
 			let appendedContent = '';
 			let appendedReasoning = '';
@@ -2596,11 +2621,13 @@ class ChatStore {
 
 		try {
 			const allMessages = await conversationsStore.getConversationMessages(activeConv.id);
-			const conversationPath = filterByLeafNodeId(
-				allMessages,
-				userMessageId,
-				false
-			) as DatabaseMessage[];
+			// Recover a recap that folded earlier turns but hangs off a sibling leaf, so
+			// editing/answering a retained-tail message keeps the fold instead of
+			// re-sending the full history.
+			const conversationPath = CompactionService.withApplicableRecap(
+				filterByLeafNodeId(allMessages, userMessageId, false) as DatabaseMessage[],
+				allMessages
+			);
 			const assistantMessage = await DatabaseService.createMessageBranch(
 				{
 					children: [],
