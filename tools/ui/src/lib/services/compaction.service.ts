@@ -330,6 +330,29 @@ export class CompactionService {
 	}
 
 	/**
+	 * Ids a new recap must record for a fold: every folded message id plus, for a
+	 * folded recap node, its transitive coverage. The new recap is then
+	 * self-contained, so a later fork that strands the older recap off-branch
+	 * cannot leak its folded turns back into sends.
+	 */
+	static transitiveFoldIds(
+		foldMessages: DatabaseMessage[],
+		allMessages: DatabaseMessage[]
+	): string[] {
+		const recapById = new Map(
+			allMessages.filter((m) => m.type === MessageType.COMPACTION).map((m) => [m.id, m])
+		);
+		const ids = new Set<string>();
+		for (const m of foldMessages) {
+			ids.add(m.id);
+			if (m.type === MessageType.COMPACTION) {
+				for (const id of CompactionService.coverageOf(m, recapById)) ids.add(id);
+			}
+		}
+		return [...ids];
+	}
+
+	/**
 	 * Decide what to fold. Keeps the newest whole turns that fit `retainPercent` of
 	 * `nCtx` and folds everything older. Sizes come from server-measured cumulative
 	 * occupancy (history is never re-tokenized).
