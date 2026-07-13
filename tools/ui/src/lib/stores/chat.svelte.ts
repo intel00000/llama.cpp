@@ -2101,7 +2101,8 @@ class ChatStore {
 
 		const descendants = findDescendantMessages(allMessages, messageId);
 		const allToDelete = [messageId, ...descendants];
-		const messagesToDelete = allMessages.filter((m) => allToDelete.includes(m.id));
+		const toDeleteSet = new Set(allToDelete);
+		const messagesToDelete = allMessages.filter((m) => toDeleteSet.has(m.id));
 
 		let assistantMessages = 0,
 			userMessages = 0;
@@ -2109,7 +2110,19 @@ class ChatStore {
 		const messageTypes: string[] = [];
 
 		for (const msg of messagesToDelete) {
-			if (msg.role === MessageRole.USER) {
+			if (msg.type === MessageType.COMPACTION) {
+				// For delete confirmation warns that the summarized history + newer turns go too.
+				if (!messageTypes.includes('conversation summary')) {
+					messageTypes.push('conversation summary');
+				}
+				const foldedIds = msg.compaction?.summarizedMessageIds ?? [];
+				if (
+					foldedIds.some((id: string) => toDeleteSet.has(id)) &&
+					!messageTypes.includes('folded history')
+				) {
+					messageTypes.push('folded history');
+				}
+			} else if (msg.role === MessageRole.USER) {
 				userMessages++;
 
 				if (!messageTypes.includes('user message')) messageTypes.push('user message');

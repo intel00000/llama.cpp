@@ -30,6 +30,8 @@
 		isLastUserMessage?: boolean;
 		nextAssistantMessage?: DatabaseMessage | null;
 		siblingInfo?: ChatMessageSiblingInfo | null;
+		recapExpanded?: boolean;
+		onToggleRecap?: () => void;
 	}
 
 	let {
@@ -40,6 +42,8 @@
 		message,
 		nextAssistantMessage = null,
 		siblingInfo = null,
+		onToggleRecap,
+		recapExpanded = false,
 		toolMessages = []
 	}: Props = $props();
 
@@ -386,7 +390,12 @@
 	{#if message.role === MessageRole.SYSTEM}
 		<ChatMessageSystem bind:textareaElement class={className} {message} />
 	{:else if message.type === MessageType.COMPACTION}
-		<ChatMessageCompaction class={className} {message} />
+		<ChatMessageCompaction
+			class={className}
+			{message}
+			foldedExpanded={recapExpanded}
+			onToggleFolded={onToggleRecap}
+		/>
 	{:else if mcpPromptExtra}
 		<ChatMessageMcpPrompt class={className} {message} mcpPrompt={mcpPromptExtra} />
 	{:else if isSynthetic}

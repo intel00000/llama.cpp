@@ -112,7 +112,7 @@
 	open={messageActions.showDeleteDialog}
 	title="Delete Message"
 	description={messageActions.deletionInfo && messageActions.deletionInfo.totalCount > 1
-		? `This will delete ${messageActions.deletionInfo.totalCount} messages including: ${messageActions.deletionInfo.userMessages} user message${messageActions.deletionInfo.userMessages > 1 ? 's' : ''} and ${messageActions.deletionInfo.assistantMessages} assistant response${messageActions.deletionInfo.assistantMessages > 1 ? 's' : ''}. All messages in this branch and their responses will be permanently removed. This action cannot be undone.`
+		? `This will delete ${messageActions.deletionInfo.totalCount} messages including: ${messageActions.deletionInfo.userMessages} user message${messageActions.deletionInfo.userMessages > 1 ? 's' : ''} and ${messageActions.deletionInfo.assistantMessages} assistant response${messageActions.deletionInfo.assistantMessages > 1 ? 's' : ''}.${messageActions.deletionInfo.messageTypes.includes('conversation summary') ? (messageActions.deletionInfo.messageTypes.includes('folded history') ? ' This branch also contains a conversation summary - deleting it removes the summarized history and every newer turn on this branch.' : ' This branch also contains a conversation summary - deleting it removes the summary; the older turns it folded are not deleted and will re-appear in the conversation.') : ''} All messages in this branch and their responses will be permanently removed. This action cannot be undone.`
 		: 'Are you sure you want to delete this message? This action cannot be undone.'}
 	confirmText={messageActions.deletionInfo && messageActions.deletionInfo.totalCount > 1
 		? `Delete ${messageActions.deletionInfo.totalCount} Messages`
