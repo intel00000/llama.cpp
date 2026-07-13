@@ -698,3 +698,9 @@ export { default as ChatScreenServerError } from './ChatScreen/ChatScreenServerE
  * Renders nothing otherwise. Shown inside ChatScreen only on an active conversation route.
  */
 export { default as ChatScreenStreamResumeStatus } from './ChatScreen/ChatScreenStreamResumeStatus.svelte';
+
+/**
+ * Inline status banner shown while a compaction is in flight for the active conversation
+ * (manual, automatic, overflow recovery, or agentic mid-run).
+ */
+export { default as ChatScreenCompactionStatus } from './ChatScreen/ChatScreenCompactionStatus.svelte';

@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
+	import { Combine } from '@lucide/svelte';
+	import { toast } from 'svelte-sonner';
 	import * as HoverCard from '$lib/components/ui/hover-card';
 	import { activeConversation, activeMessages } from '$lib/stores/conversations.svelte';
 	import { chatStore, isChatStreaming, isLoading } from '$lib/stores/chat.svelte';
@@ -11,6 +13,20 @@
 	import { colorLevelBgClass, colorLevelTextClass } from './context-gauge';
 
 	const gauge = useContextGauge();
+
+	async function handleCompact() {
+		const conv = activeConversation();
+		if (!conv) return;
+		try {
+			const result = await chatStore.compactConversation(conv.id, 'manual');
+			if (result.compacted) toast.success('Conversation compacted');
+			else if (result.reason) toast.info(result.reason);
+		} catch (error) {
+			// rethrows non-abort errors (server error).
+			console.error('Manual compaction failed:', error);
+			toast.error('Compaction failed. Please try again.');
+		}
+	}
 
 	$effect(() => {
 		const conv = activeConversation();
@@ -102,6 +118,21 @@
 					averageTokensPerSecond={gauge.averageTokensPerSecond}
 					transientDetails={gauge.transientDetails}
 				/>
+			{/if}
+
+			<!-- Imported conversations have no usage yet and need manual compaction to
+			     get within budget before the first send, so gate on turns too. -->
+			{#if activeConversation() && (gauge.hasAnyUsage || activeMessages().length > 1)}
+				{@const convId = activeConversation()!.id}
+				<button
+					type="button"
+					class="mt-1 flex items-center justify-center gap-1.5 rounded-md border border-border/50 px-2 py-1 text-xs transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+					disabled={isLoading() || isChatStreaming() || chatStore.isCompacting(convId)}
+					onclick={handleCompact}
+				>
+					<Combine class="h-3 w-3" />
+					<span>{chatStore.isCompacting(convId) ? 'Compacting...' : 'Compact now'}</span>
+				</button>
 			{/if}
 		</div>
 	</HoverCard.Content>

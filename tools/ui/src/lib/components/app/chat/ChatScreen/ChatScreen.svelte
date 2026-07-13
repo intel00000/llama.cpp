@@ -5,6 +5,7 @@
 		ChatMessages,
 		ChatScreenDragOverlay,
 		ChatScreenStreamResumeStatus,
+		ChatScreenCompactionStatus,
 		ServerLoadingSplash,
 		ChatScreenServerError
 	} from '$lib/components/app';
@@ -271,6 +272,8 @@
 			{#if page.params.id}
 				<ChatScreenStreamResumeStatus />
 			{/if}
+
+			<ChatScreenCompactionStatus />
 
 			<div class="pointer-events-none flex flex-col gap-6 items-center w-full">
 				{#if (isMobile.current ? mobileScrollDownHint || isMobileUserScrolledUp : autoScroll.userScrolledUp) && page.url.hash.includes(ROUTES.CHAT) && page.params.id}
