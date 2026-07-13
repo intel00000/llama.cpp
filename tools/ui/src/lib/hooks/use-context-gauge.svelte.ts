@@ -11,11 +11,12 @@ import {
 	singleModelName
 } from '$lib/stores/models.svelte';
 import { chatStore } from '$lib/stores/chat.svelte';
-import { activeMessages } from '$lib/stores/conversations.svelte';
+import { CompactionService } from '$lib/services';
+import { activeMessages, activeAllMessages } from '$lib/stores/conversations.svelte';
 import { isRouterMode } from '$lib/stores/server.svelte';
 import { MessageRole } from '$lib/enums';
 import { STATS_UNITS } from '$lib/constants';
-import type { ChatMessageTimings, DatabaseMessage } from '$lib/types';
+import type { DatabaseMessage } from '$lib/types';
 import { useProcessingState } from './use-processing-state.svelte';
 import {
 	colorLevelFromPercent,
@@ -50,14 +51,6 @@ export interface UseContextGaugeReturn {
 	readonly hasAnyUsage: boolean;
 	loadModel(): Promise<void>;
 	startMonitoring(): void;
-}
-
-function lastAssistantTimings(messages: DatabaseMessage[]): ChatMessageTimings | undefined {
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const m = messages[i];
-		if (m.role === MessageRole.ASSISTANT && m.timings) return m.timings;
-	}
-	return undefined;
 }
 
 function deriveLiveStats(
@@ -131,11 +124,22 @@ export function useContextGauge(): UseContextGaugeReturn {
 
 	const liveStats = $derived(deriveLiveStats(processingState.processingState));
 
+	// Recover a recap orphaned off the branch by a fork above it, then resolve the
+	// fold-aware measured assistant ONCE per branch change and share it across
+	// every reading + the occupancy fallback.
+	const recoveredBranch = $derived(
+		CompactionService.withApplicableRecap(
+			activeMessages() as DatabaseMessage[],
+			activeAllMessages() as DatabaseMessage[]
+		)
+	);
+	const measured = $derived(CompactionService.latestMeasuredAssistant(recoveredBranch));
+	const measuredTimings = $derived(measured?.timings);
+
 	const currentRead = $derived.by(() => {
-		const timings = lastAssistantTimings(activeMessages() as DatabaseMessage[]);
 		let read = 0;
-		if (timings) {
-			read = (timings.prompt_n ?? 0) + (timings.cache_n ?? 0);
+		if (measuredTimings) {
+			read = (measuredTimings.prompt_n ?? 0) + (measuredTimings.cache_n ?? 0);
 		}
 		// live.promptTokens is already the combined reading (prompt + cache),
 		// so do not also add live.cacheTokens.
@@ -146,14 +150,12 @@ export function useContextGauge(): UseContextGaugeReturn {
 	});
 
 	const currentFresh = $derived.by(() => {
-		const timings = lastAssistantTimings(activeMessages() as DatabaseMessage[]);
-		const fresh = timings?.prompt_n ?? 0;
+		const fresh = measuredTimings?.prompt_n ?? 0;
 		return Math.max(fresh, liveStats?.freshTokens ?? 0);
 	});
 
 	const currentCache = $derived.by(() => {
-		const timings = lastAssistantTimings(activeMessages() as DatabaseMessage[]);
-		const cached = timings?.cache_n ?? 0;
+		const cached = measuredTimings?.cache_n ?? 0;
 		if (liveStats && liveStats.promptTokens > 0) {
 			return Math.max(cached, liveStats.cacheTokens);
 		}
@@ -162,24 +164,39 @@ export function useContextGauge(): UseContextGaugeReturn {
 
 	const currentOutput = $derived.by(() => {
 		if (liveStats && liveStats.outputTokens > 0) return liveStats.outputTokens;
-		const timings = lastAssistantTimings(activeMessages() as DatabaseMessage[]);
-		return timings?.predicted_n ?? 0;
+		return measuredTimings?.predicted_n ?? 0;
 	});
 
 	const kvTotal = $derived(currentRead + currentOutput);
-	const contextUsed = $derived(currentRead + currentOutput);
+
+	// Fold-aware occupancy from the SAME shared `measured`.
+	const postFoldOccupancy = $derived(
+		measured
+			? CompactionService.occupancyTokens(measured.timings)
+			: CompactionService.latestRecapTokensAfter(recoveredBranch)
+	);
+	const contextUsed = $derived(
+		liveStats ? currentRead + currentOutput : (postFoldOccupancy ?? currentRead + currentOutput)
+	);
 
 	const cumulative = $derived.by(() => {
 		const messages = activeMessages() as DatabaseMessage[];
 
-		// Agentic sessions stamp the same agentic.llm totals onto every
-		// assistant message; cache_n is never per-turn so cache_total stays 0.
-		const agenticMessages = messages.filter(
-			(m) => m.role === MessageRole.ASSISTANT && m.timings?.agentic?.llm?.predicted_n != null
-		);
+		// Agentic sessions stamp the same agentic.llm totals onto every assistant message.
+		// cache_n is never per-turn so cache_total stays 0. Scan backwards for the last such
+		// message (== last of a filtered list, order preserved) instead of allocating a full
+		// throwaway filtered array on every streamed chunk.
+		let lastAgentic: DatabaseMessage | undefined;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const m = messages[i];
+			if (m.role === MessageRole.ASSISTANT && m.timings?.agentic?.llm?.predicted_n != null) {
+				lastAgentic = m;
+				break;
+			}
+		}
 
-		if (agenticMessages.length > 0) {
-			const llm = agenticMessages[agenticMessages.length - 1].timings!.agentic!.llm;
+		if (lastAgentic) {
+			const llm = lastAgentic.timings!.agentic!.llm;
 			const output = llm.predicted_n ?? 0;
 			const outputMs = llm.predicted_ms ?? 0;
 			const averageTokensPerSecond = outputMs > 0 && output > 0 ? (output / outputMs) * 1000 : null;

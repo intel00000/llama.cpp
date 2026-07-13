@@ -77,6 +77,13 @@ class ConversationsStore {
 	/** Messages in the active conversation (filtered by currNode path) */
 	activeMessages = $state<DatabaseMessage[]>([]);
 
+	/**
+	 * All messages of the active conversation (every branch). Used with
+	 * activeMessages to recover off-branch recap nodes. Branch content still comes
+	 * from activeMessages (per-chunk streaming updates land only there).
+	 */
+	activeAllMessages = $state<DatabaseMessage[]>([]);
+
 	/** Whether the store has been initialized */
 	isInitialized = $state(false);
 
@@ -263,6 +270,7 @@ class ConversationsStore {
 		this.conversations = [conversation, ...this.conversations];
 		this.activeConversation = conversation;
 		this.activeMessages = [];
+		this.activeAllMessages = [];
 
 		await goto(RouterService.chat(conversation.id));
 
@@ -292,9 +300,11 @@ class ConversationsStore {
 					false
 				) as DatabaseMessage[];
 				this.activeMessages = filteredMessages;
+				this.activeAllMessages = allMessages;
 			} else {
 				const messages = await DatabaseService.getConversationMessages(convId);
 				this.activeMessages = messages;
+				this.activeAllMessages = messages;
 			}
 
 			return true;
@@ -310,6 +320,7 @@ class ConversationsStore {
 	clearActiveConversation(): void {
 		this.activeConversation = null;
 		this.activeMessages = [];
+		this.activeAllMessages = [];
 		// reload defaults so new chats inherit persisted state
 		this.pendingReasoningEffort = ConversationsStore.loadReasoningEffortDefault();
 	}
@@ -404,6 +415,7 @@ class ConversationsStore {
 
 		if (allMessages.length === 0) {
 			this.activeMessages = [];
+			this.activeAllMessages = [];
 			return;
 		}
 
@@ -414,6 +426,7 @@ class ConversationsStore {
 		const currentPath = filterByLeafNodeId(allMessages, leafNodeId, false) as DatabaseMessage[];
 
 		this.activeMessages = currentPath;
+		this.activeAllMessages = allMessages;
 	}
 
 	/**
@@ -1157,6 +1170,7 @@ if (browser) {
 export const conversations = () => conversationsStore.conversations;
 export const activeConversation = () => conversationsStore.activeConversation;
 export const activeMessages = () => conversationsStore.activeMessages;
+export const activeAllMessages = () => conversationsStore.activeAllMessages;
 export const isConversationsInitialized = () => conversationsStore.isInitialized;
 
 /**

@@ -2355,25 +2355,26 @@ class ChatStore {
 	}
 
 	restoreProcessingStateFromMessages(messages: DatabaseMessage[], conversationId: string): void {
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const message = messages[i];
-			if (message.role === MessageRole.ASSISTANT && message.timings) {
-				const restoredState = this.parseTimingData({
-					prompt_n: message.timings.prompt_n || 0,
-					prompt_ms: message.timings.prompt_ms,
-					predicted_n: message.timings.predicted_n || 0,
-					predicted_per_second:
-						message.timings.predicted_n && message.timings.predicted_ms
-							? (message.timings.predicted_n / message.timings.predicted_ms) * 1000
-							: 0,
-					cache_n: message.timings.cache_n || 0
-				});
-				if (restoredState) {
-					this.setProcessingState(conversationId, restoredState);
-					return;
-				}
-			}
+		const branch = CompactionService.withApplicableRecap(
+			messages,
+			conversationsStore.activeAllMessages as DatabaseMessage[]
+		);
+		const message = CompactionService.latestMeasuredAssistant(branch);
+		if (!message?.timings) {
+			this.setProcessingState(conversationId, null);
+			return;
 		}
+		const restoredState = this.parseTimingData({
+			prompt_n: message.timings.prompt_n || 0,
+			prompt_ms: message.timings.prompt_ms,
+			predicted_n: message.timings.predicted_n || 0,
+			predicted_per_second:
+				message.timings.predicted_n && message.timings.predicted_ms
+					? (message.timings.predicted_n / message.timings.predicted_ms) * 1000
+					: 0,
+			cache_n: message.timings.cache_n || 0
+		});
+		this.setProcessingState(conversationId, restoredState);
 	}
 
 	getConversationModel(messages: DatabaseMessage[]): string | null {
