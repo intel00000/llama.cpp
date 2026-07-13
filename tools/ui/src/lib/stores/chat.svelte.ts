@@ -100,6 +100,8 @@ class ChatStore {
 	private abortControllers = new SvelteMap<string, AbortController>();
 	/** Conversations with a compaction in flight (single-flight guard + UI hint). */
 	private compactingConversations = new SvelteSet<string>();
+	/** Conversations mid overflow-recovery to prevent compaction thrashing. */
+	private overflowRecovering = new Set<string>();
 	private preEncodeAbortController: AbortController | null = null;
 	private processingStates = new SvelteMap<string, ApiProcessingState | null>();
 	private conversationStateTimestamps = new SvelteMap<string, ConversationStateEntry>();
@@ -1006,6 +1008,30 @@ class ChatStore {
 		this.setChatLoading(currentConv.id, true);
 		this.clearChatStreaming(currentConv.id);
 		try {
+			// Auto-compaction before adding the new turn. A failed summary must not
+			// block the send: proceed uncompacted and let overflow recovery backstop
+			// an oversized prompt.
+			if (!isNewConversation) {
+				const controller = this.getOrCreateAbortController(currentConv.id);
+				try {
+					await this.maybeAutoCompact(currentConv.id, controller.signal);
+				} catch (error) {
+					if (!isAbortError(error)) console.warn('Pre-send auto-compaction failed:', error);
+				}
+				if (controller.signal.aborted) {
+					// The user hit Stop while the summary was in flight: requeue the typed
+					// message as a pending bubble (edit/delete/send) instead of dropping it.
+					this.injectPendingMessage(currentConv.id, content, allExtras);
+					this.setChatLoading(currentConv.id, false);
+					return;
+				}
+				if (conversationsStore.activeConversation?.id !== currentConv.id) {
+					this.injectPendingMessage(currentConv.id, content, allExtras);
+					this.setChatLoading(currentConv.id, false);
+					return;
+				}
+			}
+
 			let parentIdForUserMessage: string | undefined;
 			if (isNewConversation) {
 				const rootId = await DatabaseService.createRootMessage(currentConv.id);
@@ -1376,11 +1402,19 @@ class ChatStore {
 				const contextInfo = (
 					error as Error & { contextInfo?: { n_prompt_tokens: number; n_ctx: number } }
 				).contextInfo;
-				this.showErrorDialog({
-					type: error.name === 'TimeoutError' ? ErrorDialogType.TIMEOUT : ErrorDialogType.SERVER,
-					message: error.message,
-					contextInfo
-				});
+				if (contextInfo && (await this.recoverFromOverflow(convId, assistantMessage))) {
+					return;
+				}
+				// Only surface the error dialog while this conversation is active. The send
+				// (and any overflow-recovery summary) can run for seconds, during which the
+				// user may switch away.
+				if (conversationsStore.activeConversation?.id === convId) {
+					this.showErrorDialog({
+						type: error.name === 'TimeoutError' ? ErrorDialogType.TIMEOUT : ErrorDialogType.SERVER,
+						message: error.message,
+						contextInfo
+					});
+				}
 				if (onError) onError(error);
 			}
 		};
@@ -2346,6 +2380,31 @@ class ChatStore {
 	}
 
 	/**
+	 * Pre-send auto-compaction: when enabled and the conversation's occupancy has
+	 * reached the threshold, fold older turns before the next send so it goes out on
+	 * a smaller context.
+	 *
+	 * No-op when auto is off, under threshold, or n_ctx/timings are unknown (e.g. a
+	 * new conversation). Runs with the send's abort signal so a Stop cancels the
+	 * summary too.
+	 */
+	private async maybeAutoCompact(conversationId: string, signal?: AbortSignal): Promise<void> {
+		const settings = this.getCompactionSettings();
+		if (!settings.auto) return;
+		const nCtx = this.getContextTotal();
+		// Recover a recap orphaned by a fork above it before reading occupancy, or a
+		// stale pre-fold assistant would mislead the trigger.
+		const used = CompactionService.currentOccupancy(
+			CompactionService.withApplicableRecap(
+				conversationsStore.activeMessages as DatabaseMessage[],
+				conversationsStore.activeAllMessages as DatabaseMessage[]
+			)
+		);
+		if (!CompactionService.isOverThreshold(used, nCtx, settings.threshold)) return;
+		await this.compactConversation(conversationId, 'auto', signal);
+	}
+
+	/**
 	 * Summarize a conversation's older turns into a recap checkpoint node. Folds only
 	 * whole resolved turns (never the current one), summarizes them via the chat
 	 * model, and persists the recap as a strict linear child of the current leaf, at
@@ -2509,6 +2568,42 @@ class ChatStore {
 				const pending = this.consumePendingMessage(conversationId);
 				if (pending) void this.sendMessage(pending.content, pending.extras);
 			}
+		}
+	}
+
+	/**
+	 * Overflow backstop: a send failed because the prompt exceeded n_ctx. Fold older
+	 * turns and regenerate the failed assistant on the now-collapsed context.
+	 */
+	private async recoverFromOverflow(
+		conversationId: string,
+		assistantMessage: DatabaseMessage
+	): Promise<boolean> {
+		if (this.overflowRecovering.has(conversationId)) return false;
+		// The retry reads the live active conversation, only recover if still here.
+		if (conversationsStore.activeConversation?.id !== conversationId) return false;
+		this.overflowRecovering.add(conversationId);
+		try {
+			const persisted = await DatabaseService.getConversation(conversationId);
+			if (conversationsStore.activeConversation?.id !== conversationId) return false;
+			const failedLeafId = persisted?.currNode ?? assistantMessage.id;
+			await conversationsStore.updateCurrentNode(failedLeafId);
+			const result = await this.compactConversation(
+				conversationId,
+				'overflow',
+				this.getOrCreateAbortController(conversationId).signal
+			);
+			if (!result.compacted) return false;
+			// Check the active conversation again before regenerating, to cover a case
+			// where the user switched conversations while the summary was streaming.
+			if (conversationsStore.activeConversation?.id !== conversationId) return false;
+			if (conversationsStore.findMessageIndex(failedLeafId) === -1) return false;
+			// Re-run the turn on the now-collapsed context. This will re-send the prompt
+			// and generate a new assistant message.
+			await this.regenerateMessageWithBranching(failedLeafId);
+			return true;
+		} finally {
+			this.overflowRecovering.delete(conversationId);
 		}
 	}
 
