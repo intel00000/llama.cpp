@@ -1046,6 +1046,14 @@ class ChatStore {
 					conversationsStore.addMessageToActive(systemMessage);
 					parentIdForUserMessage = systemMessage.id;
 				} else parentIdForUserMessage = rootId;
+			} else {
+				// This path is AFTER the auto-compaction just performed above, the active
+				// tail (currNode) may have changed to the new recap node. We want to parent
+				// the new user message on the currNode so that the recap stays on the resolved
+				// branch and collapseForSend can exclude the folded turns.
+				//
+				// In the regular case currNode already equals the active tail, so it's inert.
+				parentIdForUserMessage = conversationsStore.activeConversation?.currNode || undefined;
 			}
 			const userMessage = await this.addMessage(
 				MessageRole.USER,
@@ -2524,16 +2532,27 @@ class ChatStore {
 			const tokensAfter =
 				foldedSize != null ? Math.max(0, tokensBefore - foldedSize + recapSize) : tokensBefore;
 
-			// Persist the recap between the folded region and the retained tail as a
-			// linear child of the current leaf. collapseForSend prepends it regardless
-			// of tree position.
+			// Persist the recap as a CHILD of the current leaf (the retained tail's tip), with
+			// a mid-point timestamp so it renders as a divider at the fold point (branch order
+			// is a timestamp sort). collapseForSend prepends it regardless of tree position.
+			//
+			// DESIGN reminder: the recap node is made a leaf-child, NOT re-parented between the
+			// folded and retained turns (as an ancestor of the tail). Main reason is re-parenting
+			// would need a tree-mutating insert (breaking createMessageBranch's append-only
+			// invariant).
+			//
+			// The price of leaf-child is that the recap sits off the ancestor path, so:
+			//  1. a fork above it (regenerate/edit a kept turn) misses it, which
+			// 		CompactionService.withApplicableRecap re-attaches on send.
+			// 	2. the next turn would sibling it by default (the tail tip, not the recap, is
+			// 		timestamp-last), which the updateCurrentNode + parent-on-currNode fix prevents.
 			const foldLast = plan.foldMessages[plan.foldMessages.length - 1];
 			const keepFirst = plan.keepMessages[0];
 			const mid = Math.floor((foldLast.timestamp + keepFirst.timestamp) / 2);
 			const recapTs =
 				mid > foldLast.timestamp && mid < keepFirst.timestamp ? mid : keepFirst.timestamp;
 
-			await DatabaseService.createMessageBranch(
+			const recap = await DatabaseService.createMessageBranch(
 				{
 					convId: conversationId,
 					type: MessageType.COMPACTION,
@@ -2556,8 +2575,14 @@ class ChatStore {
 				leaf
 			);
 
-			// Reflect the new recap in the active view (if still in this conversation).
+			// createMessageBranch moved the DB currNode to the recap; update the in-memory leaf
+			// too so refreshActiveMessages and the next send's branch resolution resolve through
+			// the recap.
+			//
+			// Without it the recap's mid-branch timestamp keeps it off the active tail and the
+			// next turn sibling it, orphaning the recap and break collapseForSend.
 			if (conversationsStore.activeConversation?.id === conversationId) {
+				await conversationsStore.updateCurrentNode(recap.id);
 				await conversationsStore.refreshActiveMessages();
 			}
 			return { compacted: true };
