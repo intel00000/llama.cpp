@@ -11,9 +11,10 @@ import type { ChatMessageTimings, DatabaseMessage } from '$lib/types';
  *   keep chatting -> fold #2 (folds the re-attached orphan) -> plain send.
  *
  * Fold #2's recap must record the orphan's TRANSITIVE coverage
- * (transitiveFoldIds), and the send path must recover when an on-branch recap
- * references off-branch ids (needsRecapRecovery). Either mechanism alone keeps
- * the folded turns out of the payload; without both, they re-enter every send.
+ * (transitiveFoldIds), and the send path must rediscover applicable off-branch
+ * recaps (indexed recap query + withApplicableRecapNodes). Either mechanism
+ * alone keeps the folded turns out of the payload; without both, they re-enter
+ * every send.
  */
 
 let clock = 0;
@@ -118,11 +119,16 @@ function buildForkedTree() {
 	return { root, sys, u1, a1, u2, a2, u3, a3, r1, a3p, u4, a4 };
 }
 
-/** streamChatCompletion's payload assembly with the widened recovery gate. */
+/** streamChatCompletion's payload assembly with indexed recap discovery. */
 function simulateSend(leafId: string): string[] {
 	let allMessages = filterByLeafNodeId(store, leafId, false) as DatabaseMessage[];
-	if (CompactionService.needsRecapRecovery(allMessages)) {
-		allMessages = CompactionService.withApplicableRecap(allMessages, store);
+	const recaps = store.filter((m) => m.type === MessageType.COMPACTION);
+	if (recaps.length > 0) {
+		allMessages = CompactionService.withApplicableRecapNodes(
+			allMessages,
+			recaps,
+			new Set(store.map((m) => m.id))
+		);
 	}
 	return CompactionService.mergeRecapIntoNextUser(
 		CompactionService.collapseForSend(allMessages)
@@ -210,8 +216,9 @@ describe('nested-orphan coverage leak (fold -> fork -> fold -> send)', () => {
 			95
 		);
 		const u5 = add({ role: MessageRole.USER, type: MessageType.TEXT, content: 'u5' }, 'R2', 120);
-		// needsRecapRecovery sees R2's dangling R1 reference, recovery re-attaches R1,
-		// and collapseForSend expands R2's coverage through it.
+		// Indexed discovery surfaces the off-branch R1 (referenced by R2's legacy
+		// non-transitive list), recovery re-attaches it, and collapseForSend
+		// expands R2's coverage through it.
 		const sent = simulateSend(u5.id);
 		expect(sent).not.toContain('u1');
 		expect(sent).not.toContain('a1');

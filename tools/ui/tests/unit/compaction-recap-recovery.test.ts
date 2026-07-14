@@ -182,39 +182,105 @@ describe('CompactionService.withApplicableRecap', () => {
 	});
 });
 
-describe('CompactionService.needsRecapRecovery', () => {
-	it('no recap on the branch: recovery needed', () => {
+describe('withApplicableRecap tip guard', () => {
+	it('does NOT splice a recap whose coverage contains the branch tip (Continue at the fold boundary)', () => {
 		const t = buildFoldedTree();
-		const branch = filterByLeafNodeId(store, t.a2.id, false) as DatabaseMessage[];
-		expect(CompactionService.needsRecapRecovery(branch)).toBe(true);
-	});
-
-	it('on-branch recap with all folded ids on the branch: no recovery needed', () => {
-		const t = buildFoldedTree();
-		const recap = foldRecap(t.a2.id, [t.u1.id, t.a1.id], 45);
-		const branch = filterByLeafNodeId(store, recap.id, false) as DatabaseMessage[];
-		expect(CompactionService.needsRecapRecovery(branch)).toBe(false);
-	});
-
-	it('on-branch recap referencing an off-branch id: recovery needed', () => {
-		const t = buildFoldedTree();
-		// R1 hangs off the abandoned a2; R2 (on the fork branch) references it.
-		const r1 = foldRecap(t.a2.id, [t.u1.id, t.a1.id], 45);
-		const a2b = add(
-			{ role: MessageRole.ASSISTANT, type: MessageType.TEXT, content: 'a2b' },
-			t.u2.id
-		);
-		const r2 = foldRecap(a2b.id, [r1.id, t.u2.id, a2b.id], 55);
-		const branch = filterByLeafNodeId(store, r2.id, false) as DatabaseMessage[];
-		expect(CompactionService.needsRecapRecovery(branch)).toBe(true);
-	});
-
-	it('recovered branch (orphan appended): no further recovery needed', () => {
-		const t = buildFoldedTree();
-		const recap = foldRecap(t.a2.id, [t.u1.id, t.a1.id], 45);
+		// The recap folded everything up to and including a2 and hangs off a2.
+		const recap = foldRecap(t.a2.id, [t.u1.id, t.a1.id, t.u2.id, t.a2.id], 55);
 		void recap;
+		// Continue on a2 resolves the branch AT a2: collapsing would drop the very
+		// message being continued, so the recap must not attach.
+		const raw = filterByLeafNodeId(store, t.a2.id, false) as DatabaseMessage[];
+		const recovered = CompactionService.withApplicableRecap(raw, store);
+		expect(recovered).toBe(raw);
+		const sent = CompactionService.collapseForSend(recovered).map((m) => m.id);
+		expect(sent).toContain(t.a2.id);
+	});
+
+	it('still splices when the branch extends beyond the coverage', () => {
+		const t = buildFoldedTree();
+		const recap = foldRecap(t.a2.id, [t.u1.id, t.a1.id], 45);
 		const raw = filterByLeafNodeId(store, t.u2.id, false) as DatabaseMessage[];
 		const recovered = CompactionService.withApplicableRecap(raw, store);
-		expect(CompactionService.needsRecapRecovery(recovered)).toBe(false);
+		expect(recovered.some((m) => m.id === recap.id)).toBe(true);
+	});
+});
+
+describe('CompactionService.withApplicableRecapNodes', () => {
+	it('newer off-branch recap attaches even when an older on-branch recap is complete (masking regression)', () => {
+		// fold #1 -> R1 -> conversation continues THROUGH R1 -> fold #2 -> R2 ->
+		// regenerate a kept turn between the folds. R1 stays on the branch with all
+		// its folded ids present (the old needsRecapRecovery gate short-circuited
+		// here and lost R2); R2 is orphaned and must still be discovered.
+		const t = buildFoldedTree();
+		const r1 = foldRecap(t.a2.id, [t.u1.id, t.a1.id], 45);
+		const u3 = add({ role: MessageRole.USER, type: MessageType.TEXT, content: 'u3' }, r1.id);
+		const a3 = add(
+			{ role: MessageRole.ASSISTANT, type: MessageType.TEXT, content: 'a3', timings: timings(95) },
+			u3.id
+		);
+		const r2 = foldRecap(a3.id, [r1.id, t.u1.id, t.a1.id, t.u2.id, t.a2.id], 57);
+
+		// Regenerate a3: the branch resolves from u3 and carries R1 (u3's parent) but not R2.
+		const raw = filterByLeafNodeId(store, u3.id, false) as DatabaseMessage[];
+		expect(raw.some((m) => m.id === r1.id)).toBe(true);
+		expect(raw.some((m) => m.id === r2.id)).toBe(false);
+
+		const recaps = store.filter((m) => m.type === MessageType.COMPACTION);
+		const recovered = CompactionService.withApplicableRecapNodes(
+			raw,
+			recaps,
+			new Set(store.map((m) => m.id))
+		);
+		expect(recovered.some((m) => m.id === r2.id)).toBe(true);
+		// collapseForSend picks R2 (widest transitive coverage) and keeps the tail.
+		const sent = CompactionService.collapseForSend(recovered).map((m) => m.id);
+		expect(sent).toEqual([t.sys.id, r2.id, u3.id]);
+	});
+
+	it('deleted folded ids do not block applicability under a restricted existence universe', () => {
+		const t = buildFoldedTree();
+		const recap = foldRecap(t.a2.id, [t.u1.id, t.a1.id, 'ghost'], 45);
+		const raw = filterByLeafNodeId(store, t.u2.id, false) as DatabaseMessage[];
+		// Mirror the send path: existence = branch ids + bulkGet probe results
+		// ('ghost' does not exist, so it is absent from the set).
+		const existingIds = new Set(raw.map((m) => m.id));
+		const recovered = CompactionService.withApplicableRecapNodes(raw, [recap], existingIds);
+		expect(recovered.some((m) => m.id === recap.id)).toBe(true);
+	});
+
+	it('non-recap folded ids that exist but are off-branch still block', () => {
+		const t = buildFoldedTree();
+		const recap = foldRecap(t.a2.id, [t.u1.id, t.a1.id, t.u2.id, t.a2.id], 55);
+		// Editing u1 branches from sys: u2/a2 exist (present in the universe) but are
+		// not on this branch, so the recap must be refused.
+		const raw = filterByLeafNodeId(store, t.sys.id, false) as DatabaseMessage[];
+		const existingIds = new Set(store.map((m) => m.id));
+		const recovered = CompactionService.withApplicableRecapNodes(raw, [recap], existingIds);
+		expect(recovered.some((m) => m.id === recap.id)).toBe(false);
+	});
+
+	it('an appended recap does not masquerade as the tip on a second recovery pass', () => {
+		// Two sibling folds off the same leaf: R_a covers the whole branch through
+		// the real tip a2; R_b covers only {u1,a1}. Pass 1 (at tip a2) refuses R_a
+		// (tip in coverage) and appends R_b. A second pass over that result must
+		// STILL refuse R_a: the appended recap R_b is not a send target and must
+		// not shadow the real tip.
+		const t = buildFoldedTree();
+		const rA = foldRecap(t.a2.id, [t.u1.id, t.a1.id, t.u2.id, t.a2.id], 55);
+		const rB = foldRecap(t.a2.id, [t.u1.id, t.a1.id], 56);
+		const universe = new Set(store.map((m) => m.id));
+		const recaps = [rA, rB];
+
+		const raw = filterByLeafNodeId(store, t.a2.id, false) as DatabaseMessage[];
+		const pass1 = CompactionService.withApplicableRecapNodes(raw, recaps, universe);
+		expect(pass1.some((m) => m.id === rA.id)).toBe(false);
+		expect(pass1.some((m) => m.id === rB.id)).toBe(true);
+
+		const pass2 = CompactionService.withApplicableRecapNodes(pass1, recaps, universe);
+		expect(pass2.some((m) => m.id === rA.id)).toBe(false);
+		// The real tip survives collapse.
+		const sent = CompactionService.collapseForSend(pass2).map((m) => m.id);
+		expect(sent).toContain(t.a2.id);
 	});
 });

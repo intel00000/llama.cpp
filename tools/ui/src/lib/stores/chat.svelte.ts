@@ -1115,14 +1115,23 @@ class ChatStore {
 		// recap. Reassigned early (before model resolution and streaming) so all
 		// consumers receive the same context.
 		//
-		// If the branch carries no recap of its own, one may still be orphaned off it
-		// (an edit/regenerate fork above the recap, or overflow recovery). An on-branch
-		// recap can also reference folded ids that are off-branch (a nested recap
-		// stranded by a fork, or a recap recorded before transitive coverage). Either
-		// way, read the full tree and recover.
-		if (CompactionService.needsRecapRecovery(allMessages)) {
-			const full = await conversationsStore.getConversationMessages(assistantMessage.convId);
-			allMessages = CompactionService.withApplicableRecap(allMessages, full);
+		// A recap that applies to this branch may sit OFF it (an edit/regenerate
+		// fork above the recap strands it, and a newer off-branch recap can be
+		// masked by an older on-branch one). Recap nodes are globally rare and
+		// `type` is indexed, so ask the DB for the conversation's recaps directly
+		// instead of reading the whole tree or trusting a per-conversation flag.
+		{
+			const recaps = await DatabaseService.getRecapMessages(assistantMessage.convId);
+			if (recaps.length > 0) {
+				const branchIds = new Set(allMessages.map((m) => m.id));
+				const offBranchFolded = recaps
+					.filter((r) => !branchIds.has(r.id))
+					.flatMap((r) => r.compaction?.summarizedMessageIds ?? [])
+					.filter((id) => !branchIds.has(id));
+				const existingIds = await DatabaseService.getExistingMessageIds(offBranchFolded);
+				for (const id of branchIds) existingIds.add(id);
+				allMessages = CompactionService.withApplicableRecapNodes(allMessages, recaps, existingIds);
+			}
 		}
 		allMessages = CompactionService.mergeRecapIntoNextUser(
 			CompactionService.collapseForSend(allMessages)
@@ -1798,10 +1807,11 @@ class ChatStore {
 			await conversationsStore.updateCurrentNode(newAssistantMessage.id);
 			conversationsStore.updateConversationTimestamp();
 			await conversationsStore.refreshActiveMessages();
-			const conversationPath = CompactionService.withApplicableRecap(
-				filterByLeafNodeId(allMessages, parentMessage.id, false) as DatabaseMessage[],
-				allMessages
-			);
+			const conversationPath = filterByLeafNodeId(
+				allMessages,
+				parentMessage.id,
+				false
+			) as DatabaseMessage[];
 			const modelToUse = modelOverride || msg.model || undefined;
 			await this.streamChatCompletion(
 				conversationPath,
@@ -1960,10 +1970,11 @@ class ChatStore {
 			await conversationsStore.updateCurrentNode(newAssistantMessage.id);
 			conversationsStore.updateConversationTimestamp();
 			await conversationsStore.refreshActiveMessages();
-			const conversationPath = CompactionService.withApplicableRecap(
-				filterByLeafNodeId(allMessages, anchorMessage.id, false) as DatabaseMessage[],
-				allMessages
-			);
+			const conversationPath = filterByLeafNodeId(
+				allMessages,
+				anchorMessage.id,
+				false
+			) as DatabaseMessage[];
 			await this.streamChatCompletion(conversationPath, newAssistantMessage);
 		} catch (error) {
 			if (!isAbortError(error)) console.error('Failed to continue agentic turn:', error);
@@ -2343,13 +2354,13 @@ class ChatStore {
 
 		try {
 			const allMessages = await conversationsStore.getConversationMessages(activeConv.id);
-			// Recover a recap that folded earlier turns but hangs off a sibling leaf, so
-			// editing/answering a retained-tail message keeps the fold instead of
-			// re-sending the full history.
-			const conversationPath = CompactionService.withApplicableRecap(
-				filterByLeafNodeId(allMessages, userMessageId, false) as DatabaseMessage[],
-				allMessages
-			);
+			// No recovery wrap: streamChatCompletion re-derives recap recovery from
+			// the DB (a fold hanging off a sibling leaf is re-attached there).
+			const conversationPath = filterByLeafNodeId(
+				allMessages,
+				userMessageId,
+				false
+			) as DatabaseMessage[];
 			const assistantMessage = await DatabaseService.createMessageBranch(
 				{
 					convId: activeConv.id,

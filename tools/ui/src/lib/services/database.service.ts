@@ -1,7 +1,7 @@
 import Dexie, { type EntityTable } from 'dexie';
 import { findDescendantMessages, uuid, filterByLeafNodeId } from '$lib/utils';
 import { IDXDB_TABLES, IDXDB_STORES, STORAGE_APP_NAME } from '$lib/constants';
-import { MessageRole } from '$lib/enums';
+import { MessageRole, MessageType } from '$lib/enums';
 import type { McpServerOverride } from '$lib/types/database';
 
 class LlamaUiDatabase extends Dexie {
@@ -317,6 +317,44 @@ export class DatabaseService {
 	 */
 	static async getConversationMessages(convId: string): Promise<DatabaseMessage[]> {
 		return await db[IDXDB_TABLES.messages].where('convId').equals(convId).sortBy('timestamp');
+	}
+
+	/**
+	 * Gets a conversation's compaction recap nodes via the indexed `type` column.
+	 * Recap nodes are globally rare, this reads a handful of rows where a
+	 * `getConversationMessages` call would read the whole conversation.
+	 *
+	 * @param convId - Conversation ID
+	 * @returns Array of recap messages, sorted by timestamp (oldest first)
+	 */
+	static async getRecapMessages(convId: string): Promise<DatabaseMessage[]> {
+		// Two index-only key scans intersected, then fetch just this conversation's
+		// recap rows.
+		const [recapIds, convIds] = await Promise.all([
+			db[IDXDB_TABLES.messages].where('type').equals(MessageType.COMPACTION).primaryKeys(),
+			db[IDXDB_TABLES.messages].where('convId').equals(convId).primaryKeys()
+		]);
+		const convIdSet = new Set(convIds as string[]);
+		const ids = (recapIds as string[]).filter((id) => convIdSet.has(id));
+		if (ids.length === 0) return [];
+		const rows = await db[IDXDB_TABLES.messages].bulkGet(ids);
+		return rows
+			.filter((m): m is DatabaseMessage => m != null)
+			.sort((a, b) => a.timestamp - b.timestamp);
+	}
+
+	/**
+	 * Filters `ids` down to the ones that exist in the messages table.
+	 * Key-only scan is used to avoid deserializing full rows
+	 * (including base64 attachments of folded turns).
+	 *
+	 * @param ids - Message IDs to probe
+	 * @returns Set of the ids that exist
+	 */
+	static async getExistingMessageIds(ids: string[]): Promise<Set<string>> {
+		if (ids.length === 0) return new Set();
+		const keys = await db[IDXDB_TABLES.messages].where(':id').anyOf(ids).primaryKeys();
+		return new Set(keys as string[]);
 	}
 
 	/**
