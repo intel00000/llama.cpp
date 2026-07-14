@@ -1464,7 +1464,7 @@ class ChatStore {
 						toolCwd,
 						type: MessageType.TEXT
 					},
-					currentMessageId
+					lastCreatedInFlow
 				);
 
 				// mirror into the active store and move the node pointer only when this
