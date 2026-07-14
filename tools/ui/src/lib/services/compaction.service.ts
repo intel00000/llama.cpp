@@ -170,41 +170,48 @@ export class CompactionService {
 	): DatabaseMessage[] {
 		const recaps = allMessages.filter((m) => m.type === MessageType.COMPACTION);
 		if (recaps.length === 0) return branch;
+		return CompactionService.withApplicableRecapNodes(
+			branch,
+			recaps,
+			new Set(allMessages.map((m) => m.id))
+		);
+	}
+
+	/**
+	 * Core of `withApplicableRecap` with the recap nodes and the id-existence
+	 * universe supplied by the caller: the send path feeds it an indexed recap
+	 * query plus a bulkGet probe instead of a full conversation read.
+	 * `existingIds` must be a superset of the branch's ids.
+	 */
+	static withApplicableRecapNodes(
+		branch: DatabaseMessage[],
+		recaps: DatabaseMessage[],
+		existingIds: Set<string>
+	): DatabaseMessage[] {
+		if (recaps.length === 0) return branch;
 		const branchIds = new Set(branch.map((m) => m.id));
+		let tipId: string | undefined;
+		for (let i = branch.length - 1; i >= 0; i--) {
+			if (branch[i].role !== MessageRole.SYSTEM && branch[i].type !== MessageType.COMPACTION) {
+				tipId = branch[i].id;
+				break;
+			}
+		}
 		// Recap-node ids inside a folded list are structural references (a recap that
 		// folded an earlier recap), not turn content, and may sit off-branch. Ids of
 		// deleted messages can never re-enter a send. Neither blocks applicability.
 		const recapIds = new Set(recaps.map((m) => m.id));
-		const allIds = new Set(allMessages.map((m) => m.id));
 		const toAdd: DatabaseMessage[] = [];
 		for (const m of recaps) {
 			if (branchIds.has(m.id)) continue;
-			const folded = (m.compaction?.summarizedMessageIds ?? []).filter(
-				(id) => allIds.has(id) && !recapIds.has(id)
-			);
+			const raw = m.compaction?.summarizedMessageIds ?? [];
+			if (tipId != null && raw.includes(tipId)) continue;
+			const folded = raw.filter((id) => existingIds.has(id) && !recapIds.has(id));
 			if (folded.length > 0 && folded.every((id) => branchIds.has(id))) toAdd.push(m);
 		}
 		if (toAdd.length === 0) return branch;
 		toAdd.sort((a, b) => a.timestamp - b.timestamp);
 		return [...branch, ...toAdd];
-	}
-
-	/**
-	 * Whether a branch needs the full-tree recap recovery pass: it carries no recap
-	 * at all, or an on-branch recap references a folded id that is not on the
-	 * branch (a nested recap stranded by a fork, or a recap recorded before
-	 * transitive coverage) so collapseForSend could not expand it locally.
-	 */
-	static needsRecapRecovery(branch: DatabaseMessage[]): boolean {
-		if (!branch.some((m) => m.type === MessageType.COMPACTION)) return true;
-		const ids = new Set(branch.map((m) => m.id));
-		for (const m of branch) {
-			if (m.type !== MessageType.COMPACTION) continue;
-			for (const id of m.compaction?.summarizedMessageIds ?? []) {
-				if (!ids.has(id)) return true;
-			}
-		}
-		return false;
 	}
 
 	/**
