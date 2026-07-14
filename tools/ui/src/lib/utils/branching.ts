@@ -94,20 +94,42 @@ export function filterByLeafNodeId(
  *
  * @param nodeMap - Map of messages keyed by ID
  * @param messageId - Starting message ID to find leaf for
+ * @param leafCache - Optional cache to store already computed leaf nodes for efficiency
  * @returns The leaf node ID, or the original messageId if no children
  */
 function findLeafNodeInMap(
 	nodeMap: ReadonlyMap<string, DatabaseMessage>,
-	messageId: string
+	messageId: string,
+	leafCache?: Map<string, string>
 ): string {
+	const cached = leafCache?.get(messageId);
+	if (cached !== undefined) return cached;
+
+	const path: string[] = [];
 	let currentNode: DatabaseMessage | undefined = nodeMap.get(messageId);
 	while (currentNode && currentNode.children.length > 0) {
+		const hit = leafCache?.get(currentNode.id);
+		if (hit !== undefined) {
+			for (const id of path) leafCache!.set(id, hit);
+			return hit;
+		}
+		path.push(currentNode.id);
 		// Follow the last child (most recent branch)
 		const lastChildId = currentNode.children[currentNode.children.length - 1];
 		currentNode = nodeMap.get(lastChildId);
 	}
 
-	return currentNode?.id ?? messageId;
+	if (currentNode) {
+		const leaf = currentNode.id;
+		if (leafCache) {
+			for (const id of path) leafCache.set(id, leaf);
+			leafCache.set(leaf, leaf);
+		}
+		return leaf;
+	}
+	// A last-child reference was missing from the map: preserve the original behavior of
+	// returning the argument id.
+	return messageId;
 }
 
 /**
@@ -166,7 +188,8 @@ export function findDescendantMessages(
  */
 export function getMessageSiblings(
 	nodeMap: ReadonlyMap<string, DatabaseMessage>,
-	messageId: string
+	messageId: string,
+	leafCache?: Map<string, string>
 ): ChatMessageSiblingInfo | null {
 	const message = nodeMap.get(messageId);
 	if (!message) {
@@ -201,7 +224,7 @@ export function getMessageSiblings(
 	// Convert sibling message IDs to their corresponding leaf node IDs
 	// This allows navigation between different conversation branches
 	const siblingLeafIds = siblingIds.map((siblingId: string) =>
-		findLeafNodeInMap(nodeMap, siblingId)
+		findLeafNodeInMap(nodeMap, siblingId, leafCache)
 	);
 
 	// Find current message's position among siblings
@@ -225,9 +248,11 @@ export function buildSiblingInfoMap(
 	messages: readonly DatabaseMessage[]
 ): Map<string, ChatMessageSiblingInfo> {
 	const nodeMap = new Map(messages.map((msg) => [msg.id, msg] as const));
+	// Shared across all getMessageSiblings calls so each node's leaf is resolved once.
+	const leafCache = new Map<string, string>();
 	const siblingMap = new Map<string, ChatMessageSiblingInfo>();
 	for (const msg of messages) {
-		const info = getMessageSiblings(nodeMap, msg.id);
+		const info = getMessageSiblings(nodeMap, msg.id, leafCache);
 		if (info) {
 			siblingMap.set(msg.id, info);
 		}
