@@ -1296,7 +1296,7 @@ class ChatStore {
 						children: [],
 						extra: extras
 					},
-					currentMessageId
+					lastCreatedInFlow
 				);
 				// mirror into the active store and move the node pointer only when this
 				// conversation is displayed; otherwise persist the node move straight to
