@@ -102,6 +102,9 @@ class ChatStore {
 	private compactingConversations = new SvelteSet<string>();
 	/** Conversations mid overflow-recovery to prevent compaction thrashing. */
 	private overflowRecovering = new Set<string>();
+	/** Occupancy + n_ctx at the last failed/refused compaction attempt; the
+	 * auto trigger backs off until occupancy grows past it. */
+	private compactionFailureOccupancy = new Map<string, { occupancy: number; nCtx: number }>();
 	private preEncodeAbortController: AbortController | null = null;
 	private processingStates = new SvelteMap<string, ApiProcessingState | null>();
 	private conversationStateTimestamps = new SvelteMap<string, ConversationStateEntry>();
@@ -1365,6 +1368,52 @@ class ChatStore {
 				lastCreatedInFlow = msg.id;
 				return msg;
 			},
+			maybeCompact: async () => {
+				// Only compact the run's own conversation, and only when auto is on and the session
+				// is over threshold.
+				if (conversationsStore.activeConversation?.id !== convId) return null;
+				const settings = this.getCompactionSettings();
+				if (!settings.auto) return null;
+				// Skip the round if the displayed branch left the run's branch
+				// (occupancy would be read off another branch).
+				const displayBranch = conversationsStore.activeMessages as DatabaseMessage[];
+				if (!displayBranch.some((m) => m.id === lastCreatedInFlow)) return null;
+				const nCtx = this.getContextTotal();
+				const used = CompactionService.currentOccupancy(
+					CompactionService.withApplicableRecap(
+						displayBranch,
+						conversationsStore.activeAllMessages as DatabaseMessage[]
+					)
+				);
+				if (!CompactionService.isOverThreshold(used, nCtx, settings.threshold)) return null;
+				if (this.isCompactionBackedOff(convId, used, nCtx)) return null;
+
+				const result = await this.compactConversation(
+					convId,
+					'auto',
+					abortController.signal,
+					lastCreatedInFlow
+				);
+				if (!result.compacted || !result.recapId) return null;
+
+				// Chain the loop's next DB writes onto the recap, then reseed the in-memory
+				// context from the collapsed branch.
+				//
+				// Derive the leaf from the returned recap id, NOT the live
+				// activeConversation.currNode: the summary streams for seconds and the user may
+				// switch conversations meanwhile, so currNode could belong to another
+				// conversation, reseeding from recapId keeps this correct for convId.
+				const leaf = result.recapId;
+				lastCreatedInFlow = leaf;
+				const allMsgs = await conversationsStore.getConversationMessages(convId);
+				const branch = [...filterByLeafNodeId(allMsgs, leaf, false)] as DatabaseMessage[];
+				const collapsed = CompactionService.mergeRecapIntoNextUser(
+					CompactionService.collapseForSend(branch)
+				);
+				return Promise.all(
+					collapsed.map((m) => ChatService.convertDbMessageToApiChatMessageData(m))
+				);
+			},
 			onFlowComplete: (finalTimings?: ChatMessageTimings) => {
 				if (finalTimings) {
 					const idx = conversationsStore.findMessageIndex(assistantMessage.id);
@@ -2409,7 +2458,39 @@ class ChatStore {
 			)
 		);
 		if (!CompactionService.isOverThreshold(used, nCtx, settings.threshold)) return;
-		await this.compactConversation(conversationId, 'auto', signal);
+		if (this.isCompactionBackedOff(conversationId, used, nCtx)) return;
+		await this.compactConversation(
+			conversationId,
+			'auto',
+			signal,
+			conversationsStore.activeConversation?.currNode ?? undefined
+		);
+	}
+
+	/** Auto-trigger backoff: retry once occupancy grew 5% of n_ctx past the failure. */
+	private isCompactionBackedOff(
+		conversationId: string,
+		used: number | null,
+		nCtx: number | null
+	): boolean {
+		const failure = this.compactionFailureOccupancy.get(conversationId);
+		if (failure == null || used == null || nCtx == null) return false;
+		if (failure.nCtx !== nCtx) {
+			// n_ctx changed (model switch): stale evidence.
+			this.compactionFailureOccupancy.delete(conversationId);
+			return false;
+		}
+		return used < failure.occupancy + nCtx * 0.05;
+	}
+
+	/** Remember the occupancy a failed/refused compaction attempt happened at. */
+	private recordCompactionFailure(conversationId: string, branch: DatabaseMessage[]): void {
+		const nCtx = this.getContextTotal();
+		if (!nCtx) return;
+		this.compactionFailureOccupancy.set(conversationId, {
+			occupancy: CompactionService.currentOccupancy(branch) ?? 0,
+			nCtx
+		});
 	}
 
 	/**
@@ -2428,8 +2509,9 @@ class ChatStore {
 	async compactConversation(
 		conversationId: string,
 		trigger: 'manual' | 'auto' | 'overflow',
-		signal?: AbortSignal
-	): Promise<{ compacted: boolean; reason?: string }> {
+		signal?: AbortSignal,
+		leafId?: string
+	): Promise<{ compacted: boolean; reason?: string; recapId?: string }> {
 		// Set the guard synchronously before any await - no check-then-set TOCTOU.
 		if (this.compactingConversations.has(conversationId)) {
 			return { compacted: false, reason: 'Already compacting.' };
@@ -2444,12 +2526,15 @@ class ChatStore {
 			if (!conv || conv.id !== conversationId) {
 				return { compacted: false, reason: 'Conversation is not active.' };
 			}
-			const leaf = conv.currNode ?? '';
+			// Resolve the abort signal BEFORE the first await.
+			signal ??= this.getOrCreateAbortController(conversationId).signal;
+			// Fold the CALLER's branch: the live currNode can move mid-summary.
+			const leaf = leafId ?? conv.currNode ?? '';
 			const nCtx = this.getContextTotal();
 			if (!nCtx) return { compacted: false, reason: 'Context size is unknown.' };
 
 			const allMessages = await conversationsStore.getConversationMessages(conversationId);
-			if (signal?.aborted) return { compacted: false, reason: 'Aborted.' };
+			if (signal.aborted) return { compacted: false, reason: 'Aborted.' };
 			// Recover a recap orphaned off this branch before planning.
 			const branch = CompactionService.withApplicableRecap(
 				filterByLeafNodeId(allMessages, leaf, false) as DatabaseMessage[],
@@ -2482,10 +2567,11 @@ class ChatStore {
 				...converted,
 				{ role: MessageRole.USER, content: settings.prompt }
 			];
+			if (signal.aborted) return { compacted: false, reason: 'Aborted.' };
 
-			signal ??= this.getOrCreateAbortController(conversationId).signal;
 			let summary = '';
 			let summaryTimings: ChatMessageTimings | undefined;
+			let summaryReasoned = false;
 			try {
 				await ChatService.sendMessage(
 					input,
@@ -2494,8 +2580,12 @@ class ChatStore {
 						model: summaryModel,
 						max_tokens: settings.summaryMaxTokens,
 						custom: { chat_template_kwargs: { enable_thinking: false } },
+						excludeReasoningFromContext: config().excludeReasoningFromContext,
 						onChunk: (chunk: string) => {
 							summary += chunk;
+						},
+						onReasoningChunk: () => {
+							summaryReasoned = true;
 						},
 						onTimings: (t?: ChatMessageTimings) => {
 							if (t) summaryTimings = t;
@@ -2508,23 +2598,38 @@ class ChatStore {
 				if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) {
 					return { compacted: false, reason: 'Aborted.' };
 				}
+				this.recordCompactionFailure(conversationId, branch);
 				throw error;
 			}
 
 			if (signal?.aborted) return { compacted: false, reason: 'Aborted.' };
 			summary = summary.trim();
-			if (!summary) return { compacted: false, reason: 'Empty summary.' };
+			if (!summary) {
+				this.recordCompactionFailure(conversationId, branch);
+				return { compacted: false, reason: 'Empty summary.' };
+			}
+			// A summary that spent the whole token budget was cut off, not finished;
+			// persisting it would silently lose folded content.
+			if ((summaryTimings?.predicted_n ?? 0) >= settings.summaryMaxTokens) {
+				this.recordCompactionFailure(conversationId, branch);
+				return { compacted: false, reason: 'Summary hit the token limit.' };
+			}
 
 			// Anti-thrash from the summary request's OWN server timings:
 			//  - prompt_n + cache_n = the folded input the server read
 			//  - predicted_n = the recap's real size.
 			//
 			// If the recap is not smaller than what it replaces, do not compact.
+			// predicted_n counts reasoning + content: when the model reasoned, size
+			// the recap from the persisted content instead.
 			const foldedSize = summaryTimings
 				? (summaryTimings.prompt_n ?? 0) + (summaryTimings.cache_n ?? 0)
 				: null;
-			const recapSize = summaryTimings?.predicted_n ?? 0;
+			const recapSize = summaryReasoned
+				? CompactionService.estimateTextTokens(summary)
+				: (summaryTimings?.predicted_n ?? 0);
 			if (foldedSize != null && recapSize > 0 && recapSize >= foldedSize) {
+				this.recordCompactionFailure(conversationId, branch);
 				return { compacted: false, reason: 'Compaction would not reduce the context.' };
 			}
 
@@ -2585,7 +2690,8 @@ class ChatStore {
 				await conversationsStore.updateCurrentNode(recap.id);
 				await conversationsStore.refreshActiveMessages();
 			}
-			return { compacted: true };
+			this.compactionFailureOccupancy.delete(conversationId);
+			return { compacted: true, recapId: recap.id };
 		} finally {
 			this.compactingConversations.delete(conversationId);
 			if (!wasLoading) this.setChatLoading(conversationId, false);
@@ -2616,7 +2722,8 @@ class ChatStore {
 			const result = await this.compactConversation(
 				conversationId,
 				'overflow',
-				this.getOrCreateAbortController(conversationId).signal
+				this.getOrCreateAbortController(conversationId).signal,
+				failedLeafId
 			);
 			if (!result.compacted) return false;
 			// Check the active conversation again before regenerating, to cover a case

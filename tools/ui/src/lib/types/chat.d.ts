@@ -1,5 +1,5 @@
 import type { ErrorDialogType } from '$lib/enums';
-import type { ApiChatCompletionToolCall } from './api';
+import type { ApiChatCompletionToolCall, ApiChatMessageData } from './api';
 import type { DatabaseMessage, DatabaseMessageExtra } from './database';
 
 export interface ChatUploadedFile {
@@ -116,6 +116,8 @@ export interface ChatStreamCallbacks {
 		extras?: DatabaseMessageExtra[]
 	) => Promise<void>;
 	createAssistantMessage?: () => Promise<DatabaseMessage>;
+	/** Pre-turn agentic hook: fold + reseed the collapsed context, or null. */
+	maybeCompact?: () => Promise<ApiChatMessageData[] | null>;
 	onFlowComplete?: (timings?: ChatMessageTimings) => void;
 	onError?: (error: Error) => void;
 	onTurnComplete?: (intermediateTimings: ChatMessageTimings) => void;

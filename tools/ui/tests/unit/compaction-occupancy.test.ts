@@ -269,3 +269,20 @@ describe('CompactionService.currentOccupancy fold-awareness', () => {
 		expect(CompactionService.currentOccupancy(resolve(u1.id))).toBeNull();
 	});
 });
+
+describe('CompactionService.estimateTextTokens', () => {
+	it('counts whitespace words when they dominate the chars/4 floor', () => {
+		// 9 chars -> floor 3; 5 words win.
+		expect(CompactionService.estimateTextTokens('a b c d e')).toBe(5);
+	});
+
+	it('falls back to chars/4 for whitespace-poor text', () => {
+		// 40 chars, 1 whitespace word: the chars/4 floor (10) must win.
+		expect(CompactionService.estimateTextTokens('a'.repeat(40))).toBe(10);
+	});
+
+	it('is 0 for empty/blank text', () => {
+		expect(CompactionService.estimateTextTokens('')).toBe(0);
+		expect(CompactionService.estimateTextTokens('   ')).toBe(0);
+	});
+});

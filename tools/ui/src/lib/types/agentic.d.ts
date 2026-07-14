@@ -122,10 +122,15 @@ export interface AgenticFlowCallbacks {
 	) => Promise<void>;
 	/** Create a new assistant message for the next agentic turn */
 	createAssistantMessage?: () => Promise<DatabaseMessage>;
+	/**
+	 * If the session is over the compaction threshold, fold older turns and
+	 * return the reseeded (collapsed) context to POST from here on.
+	 */
+	maybeCompact?: () => Promise<ApiChatMessageData[] | null>;
 	/** Entire agentic flow is complete */
 	onFlowComplete?: (timings?: ChatMessageTimings) => void;
 	/** Error during flow */
-	onError?: (error: Error) => void;
+	onError?: (error: Error) => void | Promise<void>;
 	/** Timing updates during streaming */
 	onTimings?: (timings?: ChatMessageTimings, promptProgress?: ChatMessagePromptProgress) => void;
 	/** An agentic turn (LLM + tool execution) completed - intermediate timing update */

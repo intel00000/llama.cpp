@@ -460,6 +460,11 @@ export class CompactionService {
 		return `${RECAP_PREFIX}\n\n${summary.trim()}`;
 	}
 
+	/** Token estimate for generated text (whitespace words, chars/4 floor). */
+	static estimateTextTokens(text: string): number {
+		return CompactionService.wordCount(text);
+	}
+
 	/** Cumulative occupancy of a turn - its last assistant's timings, or null. */
 	private static turnCumulative(turn: DatabaseMessage[]): number | null {
 		for (let i = turn.length - 1; i >= 0; i--) {
