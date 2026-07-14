@@ -530,7 +530,7 @@ class AgenticStore {
 			const normalizedError = error instanceof Error ? error : new Error(String(error));
 
 			this.updateSession(conversationId, { lastError: normalizedError });
-			callbacks.onError?.(normalizedError);
+			await callbacks.onError?.(normalizedError);
 
 			return { error: normalizedError, handled: true };
 		} finally {
@@ -563,6 +563,7 @@ class AgenticStore {
 		const {
 			createAssistantMessage,
 			createToolResultMessage,
+			maybeCompact,
 			onAssistantTurnComplete,
 			onAttachments,
 			onChunk,
@@ -618,6 +619,21 @@ class AgenticStore {
 				onFlowComplete?.(this.buildFinalTimings(capturedTimings, agenticTimings));
 
 				return;
+			}
+
+			// Proactive mid-run compaction: before this turn's assistant placeholder is
+			// created, if the session is over the threshold fold the resolved prior turns
+			// and reseed the in-memory context, then continue on the smaller prompt.
+			if (turn > 0 && maybeCompact) {
+				const reseeded = await maybeCompact();
+				if (reseeded) {
+					sessionMessages.length = 0;
+					sessionMessages.push(...toAgenticMessages(reseeded));
+				}
+				if (signal?.aborted) {
+					onFlowComplete?.(this.buildFinalTimings(capturedTimings, agenticTimings));
+					return;
+				}
 			}
 
 			// For turns > 0, create a new assistant message via callback
