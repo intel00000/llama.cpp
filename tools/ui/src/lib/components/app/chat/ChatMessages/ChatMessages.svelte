@@ -305,34 +305,29 @@
 		/>
 	{/each}
 
-	{#if conversationsStore.activeConversation && agenticStore.pendingSteeringMessageContent(conversationsStore.activeConversation!.id)}
+	<!-- Gate on entry EXISTENCE: an attachment-only
+	     pending message ('' content, extras present) must stay visible or it
+	     auto-sends with no visual representation. -->
+	{#if conversationsStore.activeConversation && agenticStore.hasPendingSteeringMessage(conversationsStore.activeConversation!.id)}
 		{@const convId = conversationsStore.activeConversation!.id}
-		{@const pendingContent = agenticStore.pendingSteeringMessageContent(convId)}
-
-		{#if pendingContent}
-			<ChatMessageUserPending
-				class="mx-auto mt-12 w-full max-w-[48rem]"
-				content={pendingContent}
-				extras={agenticStore.pendingSteeringMessageExtras(convId)}
-				onSendImmediately={() => chatStore.abortCurrentFlow(convId)}
-				onEdit={(newContent, extras) =>
-					agenticStore.injectSteeringMessage(convId, newContent, extras)}
-				onDelete={() => agenticStore.clearSteeringMessage(convId)}
-			/>
-		{/if}
-	{:else if conversationsStore.activeConversation && chatStore.pendingMessageContent(conversationsStore.activeConversation!.id)}
+		<ChatMessageUserPending
+			class="mx-auto mt-12 w-full max-w-[48rem]"
+			content={agenticStore.pendingSteeringMessageContent(convId) ?? ''}
+			extras={agenticStore.pendingSteeringMessageExtras(convId)}
+			onSendImmediately={() => chatStore.abortCurrentFlow(convId)}
+			onEdit={(newContent, extras) =>
+				agenticStore.injectSteeringMessage(convId, newContent, extras)}
+			onDelete={() => agenticStore.clearSteeringMessage(convId)}
+		/>
+	{:else if conversationsStore.activeConversation && chatStore.hasPendingMessage(conversationsStore.activeConversation!.id)}
 		{@const convId = conversationsStore.activeConversation!.id}
-		{@const pendingContent = chatStore.pendingMessageContent(convId)}
-
-		{#if pendingContent}
-			<ChatMessageUserPending
-				class="mx-auto mt-12 w-full max-w-[48rem]"
-				content={pendingContent}
-				extras={chatStore.pendingMessageExtras(convId)}
-				onSendImmediately={() => chatStore.abortCurrentFlow(convId)}
-				onEdit={(newContent, extras) => chatStore.injectPendingMessage(convId, newContent, extras)}
-				onDelete={() => chatStore.clearPendingMessage(convId)}
-			/>
-		{/if}
+		<ChatMessageUserPending
+			class="mx-auto mt-12 w-full max-w-[48rem]"
+			content={chatStore.pendingMessageContent(convId) ?? ''}
+			extras={chatStore.pendingMessageExtras(convId)}
+			onSendImmediately={() => chatStore.sendPendingNow(convId)}
+			onEdit={(newContent, extras) => chatStore.replacePendingMessage(convId, newContent, extras)}
+			onDelete={() => chatStore.clearPendingMessage(convId)}
+		/>
 	{/if}
 </div>
