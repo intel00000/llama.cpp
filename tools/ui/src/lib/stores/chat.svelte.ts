@@ -38,6 +38,7 @@ import {
 	isAbortError,
 	generateConversationTitle
 } from '$lib/utils';
+import { PendingMessageQueue, type PendingEntry } from '$lib/utils/pending-queue';
 import { classifyContinueIntent } from '$lib/utils/agentic';
 import {
 	MAX_INACTIVE_CONVERSATION_STATES,
@@ -119,11 +120,10 @@ class ChatStore {
 	private _pendingDraftMessage = $state<string>('');
 	private _pendingDraftFiles = $state<ChatUploadedFile[]>([]);
 
-	/** Reactive: queued pending messages for non-agentic streaming */
-	private _pendingMessages = new SvelteMap<
-		string,
-		{ content: string; extras?: DatabaseMessageExtra[] }
-	>();
+	/** Pending messages per conversation (see PendingMessageQueue).
+	 * Backed by a SvelteMap so the bubble UI stays reactive. */
+	private _pendingMessages = new SvelteMap<string, PendingEntry[]>();
+	private pendingQueue = new PendingMessageQueue(this._pendingMessages);
 
 	private setChatLoading(convId: string, loading: boolean): void {
 		this.touchConversationState(convId);
@@ -415,10 +415,13 @@ class ChatStore {
 						timings
 					});
 					cleanup();
+					// Dispatch a message QUEUED while the attached stream ran.
+					await this.dispatchQueuedMessage(convId);
 				},
 				(err: Error) => {
 					console.error('attachServerStream pipe error:', err);
 					cleanup();
+					this.pendingQueue.clearQueued(convId);
 				},
 				(chunk: string) => {
 					streamedReasoningContent += chunk;
@@ -587,6 +590,31 @@ class ChatStore {
 		}
 	}
 
+	/**
+	 * Dispatch a queued pending message right away. With a stream in flight,
+	 * aborting it is enough - the abort handlers consume and re-send the pending
+	 * message. When idle (queued during a stopped pre-send compaction or a
+	 * conversation switch) nothing would ever pick it up, so send it directly.
+	 */
+	async sendPendingNow(convId: string): Promise<void> {
+		if (conversationsStore.activeConversation?.id !== convId) return;
+		if (this.chatStreamingStates.has(convId)) {
+			// Promote a parked head: the abort route dispatches queued entries only.
+			// A held head needs nothing, its owning flow sends it on completion.
+			this.pendingQueue.promoteParked(convId);
+			await this.abortCurrentFlow(convId);
+			return;
+		}
+		if (this.chatLoadingStates.has(convId)) {
+			// Compaction-held loading window (no stream to abort): promote in place;
+			// the in-flight flow's completion dispatches it.
+			this.pendingQueue.promoteParked(convId);
+			return;
+		}
+		const pending = this.pendingQueue.takeHead(convId);
+		if (pending) await this.sendMessage(pending.content, pending.extras);
+	}
+
 	private showErrorDialog(state: ErrorDialogState | null): void {
 		this.errorDialogState = state;
 	}
@@ -729,32 +757,58 @@ class ChatStore {
 	}
 
 	hasPendingMessage(convId: string): boolean {
-		return this._pendingMessages.has(convId);
+		return this.pendingQueue.has(convId);
 	}
 
+	/** The pending bubble shows the HEAD of the queue. */
 	pendingMessageContent(convId: string): string | null {
-		return this._pendingMessages.get(convId)?.content ?? null;
+		return this.pendingQueue.head(convId)?.content ?? null;
 	}
 
 	pendingMessageExtras(convId: string): DatabaseMessageExtra[] | undefined {
-		return this._pendingMessages.get(convId)?.extras;
+		return this.pendingQueue.head(convId)?.extras;
 	}
 
-	injectPendingMessage(convId: string, content: string, extras?: DatabaseMessageExtra[]): void {
-		this._pendingMessages.set(convId, { content, extras });
+	injectPendingMessage(
+		convId: string,
+		content: string,
+		extras?: DatabaseMessageExtra[],
+		kind: 'queued' | 'parked' = 'queued'
+	): void {
+		if (kind === 'parked') this.pendingQueue.park(convId, content, extras);
+		else this.pendingQueue.enqueue(convId, content, extras);
 	}
 
+	/** Replace the head entry in place (bubble Edit), keeping its kind and position. */
+	replacePendingMessage(convId: string, content: string, extras?: DatabaseMessageExtra[]): void {
+		this.pendingQueue.replaceHead(convId, content, extras);
+	}
+
+	/** Drop the head entry (bubble Delete), a dropped held entry cancels its send. */
 	clearPendingMessage(convId: string): void {
-		this._pendingMessages.delete(convId);
+		this.pendingQueue.dropHead(convId);
 	}
 
+	/** Remove and return the head entry regardless of kind - explicit user action. */
 	consumePendingMessage(
 		convId: string
 	): { content: string; extras?: DatabaseMessageExtra[] } | null {
-		const msg = this._pendingMessages.get(convId);
-		if (!msg) return null;
-		this._pendingMessages.delete(convId);
-		return msg;
+		return this.pendingQueue.takeHead(convId);
+	}
+
+	/**
+	 * Dispatch a queued entry to its OWN conversation: send when it is active,
+	 * else park it so the user finds it as a bubble on return instead of the
+	 * message landing in whatever conversation is on screen.
+	 */
+	private async dispatchQueuedMessage(convId: string): Promise<void> {
+		const pending = this.pendingQueue.takeNextQueued(convId);
+		if (!pending) return;
+		if (conversationsStore.activeConversation?.id === convId) {
+			await this.sendMessage(pending.content, pending.extras);
+		} else {
+			this.pendingQueue.park(convId, pending.content, pending.extras);
+		}
 	}
 
 	private touchConversationState(convId: string): void {
@@ -998,7 +1052,7 @@ class ChatStore {
 
 		// Consume MCP resource attachments - converts them to extras and clears the live store
 		const resourceExtras = mcpStore.consumeResourceAttachmentsAsExtras();
-		const allExtras = resourceExtras.length > 0 ? [...(extras || []), ...resourceExtras] : extras;
+		let allExtras = resourceExtras.length > 0 ? [...(extras || []), ...resourceExtras] : extras;
 
 		let isNewConversation = false;
 		if (!activeConv) {
@@ -1016,23 +1070,29 @@ class ChatStore {
 			// an oversized prompt.
 			if (!isNewConversation) {
 				const controller = this.getOrCreateAbortController(currentConv.id);
+				// The typed message is held as a visible parked bubble while the
+				// summary may stream for many seconds (the textarea is already
+				// cleared).
+				const holdId = this.pendingQueue.hold(currentConv.id, content, allExtras);
 				try {
 					await this.maybeAutoCompact(currentConv.id, controller.signal);
 				} catch (error) {
 					if (!isAbortError(error)) console.warn('Pre-send auto-compaction failed:', error);
 				}
-				if (controller.signal.aborted) {
-					// The user hit Stop while the summary was in flight: requeue the typed
-					// message as a pending bubble (edit/delete/send) instead of dropping it.
-					this.injectPendingMessage(currentConv.id, content, allExtras);
+				if (
+					controller.signal.aborted ||
+					conversationsStore.activeConversation?.id !== currentConv.id
+				) {
 					this.setChatLoading(currentConv.id, false);
 					return;
 				}
-				if (conversationsStore.activeConversation?.id !== currentConv.id) {
-					this.injectPendingMessage(currentConv.id, content, allExtras);
+				const held = this.pendingQueue.takeHeld(currentConv.id, holdId);
+				if (!held) {
 					this.setChatLoading(currentConv.id, false);
 					return;
 				}
+				content = held.content;
+				allExtras = held.extras;
 			}
 
 			let parentIdForUserMessage: string | undefined;
@@ -1452,25 +1512,23 @@ class ChatStore {
 				this.setStreamingActive(false);
 				if (isAbortError(error)) {
 					cleanupStreamingState();
-					// If aborted with a pending message (e.g. "Send immediately"), re-send it
-					const pending = this.consumePendingMessage(convId);
-					if (pending) {
-						this.sendMessage(pending.content, pending.extras);
-					}
+					// Re-send a QUEUED message (e.g. "Send immediately").
+					void this.dispatchQueuedMessage(convId);
 					return;
 				}
 				console.error('Streaming error:', error);
 				// keep whatever was streamed so far, the message stays in memory and in DB
 				await this.savePartialResponseIfNeeded(convId);
 				cleanupStreamingState();
-				this.clearPendingMessage(convId);
 
 				const contextInfo = (
 					error as Error & { contextInfo?: { n_prompt_tokens: number; n_ctx: number } }
 				).contextInfo;
+				// A successful overflow recovery re-runs the turn.
 				if (contextInfo && (await this.recoverFromOverflow(convId, assistantMessage))) {
 					return;
 				}
+				this.pendingQueue.clearQueued(convId);
 				// Only surface the error dialog while this conversation is active. The send
 				// (and any overflow-recovery summary) can run for seconds, during which the
 				// user may switch away.
@@ -1565,11 +1623,8 @@ class ChatStore {
 						await this.generateTitleWithLLM(firstUserMessageContent, streamedContent, convId);
 					}
 
-					// Check if there's a pending message queued during streaming
-					const pending = this.consumePendingMessage(convId);
-					if (pending) {
-						await this.sendMessage(pending.content, pending.extras);
-					}
+					// Dispatch a message QUEUED during this stream.
+					await this.dispatchQueuedMessage(convId);
 				},
 				onError: streamCallbacks.onError
 			},
@@ -1584,6 +1639,8 @@ class ChatStore {
 		await this.stopGenerationForChat(activeConv.id);
 	}
 	async stopGenerationForChat(convId: string): Promise<void> {
+		// Stop cancels queued follow-ups only when a generation stream was active.
+		const wasStreaming = this.chatStreamingStates.has(convId);
 		await this.savePartialResponseIfNeeded(convId);
 		this.setStreamingActive(false);
 		// tell the server to stop the generation, not just drop the HTTP socket. without this the
@@ -1596,7 +1653,7 @@ class ChatStore {
 		this.setChatLoading(convId, false);
 		this.clearChatStreaming(convId);
 		this.setProcessingState(convId, null);
-		this.clearPendingMessage(convId);
+		if (wasStreaming) this.pendingQueue.clearQueued(convId);
 	}
 
 	private async generateTitleWithLLM(
@@ -2130,6 +2187,8 @@ class ChatStore {
 						this.setChatLoading(msg.convId, false);
 						this.clearChatStreaming(msg.convId);
 						this.setProcessingState(msg.convId, null);
+
+						await this.dispatchQueuedMessage(msg.convId);
 					},
 					onError: async (error: Error) => {
 						if (isAbortError(error)) {
@@ -2154,6 +2213,8 @@ class ChatStore {
 							this.clearChatStreaming(msg.convId);
 							this.setProcessingState(msg.convId, null);
 
+							await this.dispatchQueuedMessage(msg.convId);
+
 							return;
 						}
 
@@ -2173,6 +2234,7 @@ class ChatStore {
 						this.setChatLoading(msg.convId, false);
 						this.clearChatStreaming(msg.convId);
 						this.setProcessingState(msg.convId, null);
+						this.pendingQueue.clearQueued(msg.convId);
 						this.showErrorDialog({
 							type:
 								error.name === 'TimeoutError' ? ErrorDialogType.TIMEOUT : ErrorDialogType.SERVER,
@@ -2706,9 +2768,8 @@ class ChatStore {
 		} finally {
 			this.compactingConversations.delete(conversationId);
 			if (!wasLoading) this.setChatLoading(conversationId, false);
-			if (trigger === 'manual' && conversationsStore.activeConversation?.id === conversationId) {
-				const pending = this.consumePendingMessage(conversationId);
-				if (pending) void this.sendMessage(pending.content, pending.extras);
+			if (trigger === 'manual') {
+				void this.dispatchQueuedMessage(conversationId);
 			}
 		}
 	}
@@ -2982,8 +3043,9 @@ export const chatPendingMessageContent = (convId: string) =>
 	chatStore.pendingMessageContent(convId);
 export const chatPendingMessageExtras = (convId: string) => chatStore.pendingMessageExtras(convId);
 export const chatClearPendingMessage = (convId: string) => chatStore.clearPendingMessage(convId);
+// Bubble "Edit": replace the head entry in place.
 export const chatInjectPendingMessage = (
 	convId: string,
 	content: string,
 	extras?: DatabaseMessageExtra[]
-) => chatStore.injectPendingMessage(convId, content, extras);
+) => chatStore.replacePendingMessage(convId, content, extras);

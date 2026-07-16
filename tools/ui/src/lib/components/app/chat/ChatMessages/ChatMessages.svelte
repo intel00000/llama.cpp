@@ -8,6 +8,7 @@
 	import { chatStore } from '$lib/stores/chat.svelte';
 	import { CompactionService } from '$lib/services';
 	import {
+		chatHasPendingMessage,
 		chatPendingMessageContent,
 		chatPendingMessageExtras,
 		chatClearPendingMessage,
@@ -16,6 +17,7 @@
 	import { conversationsStore, activeConversation } from '$lib/stores/conversations.svelte';
 	import { config } from '$lib/stores/settings.svelte';
 	import {
+		agenticHasPendingSteeringMessage,
 		agenticPendingSteeringMessageContent,
 		agenticPendingSteeringMessageExtras,
 		agenticClearSteeringMessage,
@@ -349,33 +351,28 @@
 		/>
 	{/each}
 
-	{#if activeConversation() && agenticPendingSteeringMessageContent(activeConversation()!.id)}
+	<!-- Gate on entry EXISTENCE: an attachment-only
+	     pending message ('' content, extras present) must stay visible or it
+	     auto-sends with no visual representation. -->
+	{#if activeConversation() && agenticHasPendingSteeringMessage(activeConversation()!.id)}
 		{@const convId = activeConversation()!.id}
-		{@const pendingContent = agenticPendingSteeringMessageContent(convId)}
-
-		{#if pendingContent}
-			<ChatMessageUserPending
-				class="mx-auto mt-12 w-full max-w-[48rem]"
-				content={pendingContent}
-				extras={agenticPendingSteeringMessageExtras(convId)}
-				onSendImmediately={() => chatStore.abortCurrentFlow(convId)}
-				onEdit={(newContent, extras) => agenticInjectSteeringMessage(convId, newContent, extras)}
-				onDelete={() => agenticClearSteeringMessage(convId)}
-			/>
-		{/if}
-	{:else if activeConversation() && chatPendingMessageContent(activeConversation()!.id)}
+		<ChatMessageUserPending
+			class="mx-auto mt-12 w-full max-w-[48rem]"
+			content={agenticPendingSteeringMessageContent(convId) ?? ''}
+			extras={agenticPendingSteeringMessageExtras(convId)}
+			onSendImmediately={() => chatStore.abortCurrentFlow(convId)}
+			onEdit={(newContent, extras) => agenticInjectSteeringMessage(convId, newContent, extras)}
+			onDelete={() => agenticClearSteeringMessage(convId)}
+		/>
+	{:else if activeConversation() && chatHasPendingMessage(activeConversation()!.id)}
 		{@const convId = activeConversation()!.id}
-		{@const pendingContent = chatPendingMessageContent(convId)}
-
-		{#if pendingContent}
-			<ChatMessageUserPending
-				class="mx-auto mt-12 w-full max-w-[48rem]"
-				content={pendingContent}
-				extras={chatPendingMessageExtras(convId)}
-				onSendImmediately={() => chatStore.abortCurrentFlow(convId)}
-				onEdit={(newContent, extras) => chatInjectPendingMessage(convId, newContent, extras)}
-				onDelete={() => chatClearPendingMessage(convId)}
-			/>
-		{/if}
+		<ChatMessageUserPending
+			class="mx-auto mt-12 w-full max-w-[48rem]"
+			content={chatPendingMessageContent(convId) ?? ''}
+			extras={chatPendingMessageExtras(convId)}
+			onSendImmediately={() => chatStore.sendPendingNow(convId)}
+			onEdit={(newContent, extras) => chatInjectPendingMessage(convId, newContent, extras)}
+			onDelete={() => chatClearPendingMessage(convId)}
+		/>
 	{/if}
 </div>
