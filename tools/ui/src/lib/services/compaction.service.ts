@@ -462,6 +462,37 @@ export class CompactionService {
 		};
 	}
 
+	/**
+	 * Plan which off-path recaps a fork must clone and where each clone parents:
+	 * the deepest cloned path message its coverage includes, so a tail rewind in
+	 * the fork cannot cascade the fold away. The send path re-attaches off-branch
+	 * clones via the usual orphan discovery.
+	 */
+	static planForkRecapClones(
+		pathMessages: DatabaseMessage[],
+		allMessages: DatabaseMessage[]
+	): { recap: DatabaseMessage; boundaryId: string }[] {
+		const allRecaps = allMessages.filter((m) => m.type === MessageType.COMPACTION);
+		if (allRecaps.length === 0) return [];
+		const orphans = CompactionService.withApplicableRecapNodes(
+			pathMessages,
+			allRecaps,
+			new Set(allMessages.map((m) => m.id))
+		).slice(pathMessages.length);
+		const recapById = new Map(allRecaps.map((c) => [c.id, c] as const));
+		const pathById = new Map(pathMessages.map((m) => [m.id, m] as const));
+		const parentIds = new Set(pathMessages.map((m) => m.parent));
+		const leaf = pathMessages.find((m) => !parentIds.has(m.id));
+		return orphans.map((recap) => {
+			const coverage = CompactionService.coverageOf(recap, recapById);
+			let node = leaf;
+			while (node && !coverage.has(node.id)) {
+				node = node.parent ? pathById.get(node.parent) : undefined;
+			}
+			return { recap, boundaryId: (node ?? pathMessages[0]).id };
+		});
+	}
+
 	/** Recap node content: a fixed prefix followed by the generated summary. */
 	static formatRecap(summary: string): string {
 		return `${RECAP_PREFIX}\n\n${summary.trim()}`;

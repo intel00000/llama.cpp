@@ -1,5 +1,6 @@
 import { IDXDB_STORES, IDXDB_TABLES, STORAGE_APP_NAME } from '$lib/constants';
 import { MessageRole, MessageType } from '$lib/enums';
+import { CompactionService } from './compaction.service';
 import type { McpServerOverride } from '$lib/types/database';
 import type { ExportedConversation } from '$lib/types/database';
 import { filterByLeafNodeId, findDescendantMessages, uuid } from '$lib/utils';
@@ -730,6 +731,18 @@ export class DatabaseService {
 					idMap.set(msg.id, uuid());
 				}
 
+				// Remap through the transitive closure: a legacy list may reference an
+				// off-path recap node whose covered turns ARE path ancestors.
+				const recapById = new Map(
+					allMessages
+						.filter((m) => m.type === MessageType.COMPACTION)
+						.map((m) => [m.id, m] as const)
+				);
+				const remapCoverage = (recap: DatabaseMessage): string[] =>
+					[...CompactionService.coverageOf(recap, recapById)]
+						.map((id) => idMap.get(id))
+						.filter((id): id is string => id !== undefined);
+
 				const newConvId = uuid();
 				const clonedMessages: DatabaseMessage[] = pathMessages.map((msg) => {
 					const newId = idMap.get(msg.id)!;
@@ -739,12 +752,7 @@ export class DatabaseService {
 						.map((childId: string) => idMap.get(childId)!);
 
 					const newCompaction = msg.compaction
-						? {
-								...msg.compaction,
-								summarizedMessageIds: msg.compaction.summarizedMessageIds
-									.map((id: string) => idMap.get(id))
-									.filter((id: string | undefined): id is string => id !== undefined)
-							}
+						? { ...msg.compaction, summarizedMessageIds: remapCoverage(msg) }
 						: undefined;
 
 					return {
@@ -757,9 +765,31 @@ export class DatabaseService {
 						parent: newParent
 					};
 				});
-				const lastClonedMessage = clonedMessages[clonedMessages.length - 1];
+
+				// Clone every applicable off-path recap, parented at its coverage
+				// boundary so a tail rewind in the fork cannot cascade the fold away.
+				// The send path re-attaches off-branch clones via orphan discovery.
+				const plan = CompactionService.planForkRecapClones(pathMessages, allMessages);
+				for (const { recap, boundaryId } of plan) {
+					const parentCloneId = idMap.get(boundaryId)!;
+					const parentClone = clonedMessages.find((m) => m.id === parentCloneId);
+					const clone: DatabaseMessage = {
+						...recap,
+						id: uuid(),
+						convId: newConvId,
+						parent: parentCloneId,
+						children: [],
+						compaction: recap.compaction
+							? { ...recap.compaction, summarizedMessageIds: remapCoverage(recap) }
+							: undefined
+					};
+					if (parentClone) parentClone.children = [...parentClone.children, clone.id];
+					clonedMessages.push(clone);
+				}
+
+				const forkCurrNodeId = idMap.get(atMessageId)!;
 				const newConv: DatabaseConversation = {
-					currNode: lastClonedMessage.id,
+					currNode: forkCurrNodeId,
 					cwd: sourceConv.cwd,
 					forkedFromConversationId: sourceConvId,
 					id: newConvId,
