@@ -25,6 +25,7 @@ export {
 	findMessageById,
 	findLeafNode,
 	findDescendantMessages,
+	replacementLeafAfterDelete,
 	getMessageSiblings,
 	buildSiblingInfoMap
 } from './branching';
