@@ -33,7 +33,7 @@ import {
 	normalizeModelName,
 	filterByLeafNodeId,
 	findDescendantMessages,
-	findLeafNode,
+	replacementLeafAfterDelete,
 	findMessageById,
 	isAbortError,
 	generateConversationTitle
@@ -1961,22 +1961,12 @@ class ChatStore {
 			const currentPath = filterByLeafNodeId(allMessages, activeConv.currNode || '', false);
 			const isInCurrentPath = currentPath.some((m) => m.id === messageId);
 
-			if (isInCurrentPath && messageToDelete.parent) {
-				const siblings = allMessages.filter(
-					(m) => m.parent === messageToDelete.parent && m.id !== messageId
-				);
-
-				if (siblings.length > 0) {
-					const latestSibling = siblings.reduce((latest, sibling) =>
-						sibling.timestamp > latest.timestamp ? sibling : latest
-					);
-
-					await conversationsStore.updateCurrentNode(findLeafNode(allMessages, latestSibling.id));
-				} else if (messageToDelete.parent) {
-					await conversationsStore.updateCurrentNode(
-						findLeafNode(allMessages, messageToDelete.parent)
-					);
-				}
+			if (isInCurrentPath) {
+				// Resolve on the post-delete tree: a pre-delete leaf walk can land inside
+				// the doomed subtree and persist a dangling currNode, which the next send
+				// would use as a parent.
+				const replacement = replacementLeafAfterDelete(allMessages, messageId);
+				if (replacement) await conversationsStore.updateCurrentNode(replacement);
 			}
 
 			await DatabaseService.deleteMessageCascading(activeConv.id, messageId);

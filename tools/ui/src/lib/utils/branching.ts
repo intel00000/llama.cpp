@@ -179,6 +179,30 @@ export function findDescendantMessages(
 }
 
 /**
+ * The currNode a cascade delete of `messageId` must fall back to the latest
+ * surviving sibling's leaf, else the parent. Resolved on the POST-delete tree,
+ * since a pre-delete leaf walk can descend into the doomed subtree and persist
+ * a dangling currNode. Returns null when the message has no parent.
+ */
+export function replacementLeafAfterDelete(
+	messages: readonly DatabaseMessage[],
+	messageId: string
+): string | null {
+	const target = messages.find((m) => m.id === messageId);
+	if (!target?.parent) return null;
+	const doomed = new Set([messageId, ...findDescendantMessages(messages, messageId)]);
+	const survivors = messages
+		.filter((m) => !doomed.has(m.id))
+		.map((m) => ({ ...m, children: m.children.filter((c: string) => !doomed.has(c)) }));
+	const siblings = survivors.filter((m) => m.parent === target.parent);
+	if (siblings.length > 0) {
+		const latest = siblings.reduce((a, b) => (b.timestamp > a.timestamp ? b : a));
+		return findLeafNode(survivors, latest.id);
+	}
+	return findLeafNode(survivors, target.parent);
+}
+
+/**
  * Gets sibling information for a message, including all sibling IDs and current position.
  * Siblings are messages that share the same parent.
  *
