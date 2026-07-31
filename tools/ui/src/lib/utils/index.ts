@@ -348,3 +348,6 @@ export { remToPx } from './css';
 
 // Audio format helper (used by agentic store and chat service)
 export { getAudioInputFormat } from './audio-format';
+
+// Single-owner claim over a shared instance
+export { claimOnce } from './claim-once';

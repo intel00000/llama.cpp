@@ -53,6 +53,7 @@ import type {
 } from '$lib/types';
 import {
 	classifyContinueIntent,
+	claimOnce,
 	filterByLeafNodeId,
 	findDescendantMessages,
 	findLeafNode,
@@ -1358,14 +1359,14 @@ class ChatStore {
 
 			console.error('Failed to send message:', error);
 			this.setChatLoading(currentConv.id, false);
+			const contextInfo = (
+				error as Error & { contextInfo?: { n_prompt_tokens: number; n_ctx: number } }
+			).contextInfo;
+			if (contextInfo && error instanceof Error && !claimOnce(error)) return;
 			const dialogType =
 				error instanceof Error && error.name === 'TimeoutError'
 					? ErrorDialogType.TIMEOUT
 					: ErrorDialogType.SERVER;
-			const contextInfo = (
-				error as Error & { contextInfo?: { n_prompt_tokens: number; n_ctx: number } }
-			).contextInfo;
-
 			this.showErrorDialog({
 				contextInfo,
 				message: error instanceof Error ? error.message : 'Unknown error',
@@ -1626,14 +1627,18 @@ class ChatStore {
 					return;
 				}
 
+				const contextInfo = (
+					error as Error & { contextInfo?: { n_prompt_tokens: number; n_ctx: number } }
+				).contextInfo;
+				// ChatService reports the same failure to onError twice and then rethrows into
+				// sendMessage's catch. For an overflow, only the first caller runs recovery and
+				// surfaces on failure; the duplicate invocation and the outer catch defer, so a
+				// successful recovery leaves no error dialog and no dropped queue.
+				if (contextInfo && !claimOnce(error)) return;
 				console.error('Streaming error:', error);
 				// keep whatever was streamed so far, the message stays in memory and in DB
 				await this.savePartialResponseIfNeeded(convId);
 				cleanupStreamingState();
-
-				const contextInfo = (
-					error as Error & { contextInfo?: { n_prompt_tokens: number; n_ctx: number } }
-				).contextInfo;
 
 				// A successful overflow recovery re-runs the turn.
 				if (contextInfo && (await this.recoverFromOverflow(convId, assistantMessage))) {
