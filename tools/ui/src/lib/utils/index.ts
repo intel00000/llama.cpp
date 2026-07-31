@@ -353,4 +353,10 @@ export { getAudioInputFormat } from './audio-format';
 export { claimOnce } from './claim-once';
 
 // Generation stop-signal classification
-export { classifyStopSignal, type StopSignal, type StopSignalInput } from './stop-signal';
+export {
+	classifyStopSignal,
+	chooseTruncationResubmit,
+	type StopSignal,
+	type StopSignalInput,
+	type TruncationResubmit
+} from './stop-signal';

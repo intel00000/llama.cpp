@@ -47,3 +47,28 @@ export function classifyStopSignal(input: StopSignalInput): StopSignal {
 
 	return 'unknown';
 }
+
+export type TruncationResubmit = 'continue' | 'regenerate';
+
+/**
+ * Chooses how to resubmit a turn cut short by context exhaustion, given what was already streamed.
+ */
+export function chooseTruncationResubmit(input: {
+	content?: string;
+	reasoningContent?: string;
+	toolCalls?: string;
+	excludeReasoning?: boolean;
+}): TruncationResubmit {
+	const hasContent = !!input.content?.trim();
+	if (hasContent) return 'continue';
+
+	// A cut inside tool-call leaves an unusable partial call - regenerate.
+	const hasToolCalls =
+		!!input.toolCalls && input.toolCalls.trim() !== '' && input.toolCalls !== '[]';
+	if (hasToolCalls) return 'regenerate';
+
+	// Reasoning-only cut: continue only when the reasoning is sent back.
+	if (input.reasoningContent?.trim() && !input.excludeReasoning) return 'continue';
+
+	return 'regenerate';
+}
