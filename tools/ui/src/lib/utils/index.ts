@@ -351,3 +351,6 @@ export { getAudioInputFormat } from './audio-format';
 
 // Single-owner claim over a shared instance
 export { claimOnce } from './claim-once';
+
+// Generation stop-signal classification
+export { classifyStopSignal, type StopSignal, type StopSignalInput } from './stop-signal';
