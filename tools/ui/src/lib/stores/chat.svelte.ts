@@ -54,6 +54,7 @@ import type {
 import {
 	classifyContinueIntent,
 	claimOnce,
+	classifyStopSignal,
 	filterByLeafNodeId,
 	findDescendantMessages,
 	findLeafNode,
@@ -1845,15 +1846,24 @@ class ChatStore {
 					finalContent?: string,
 					reasoningContent?: string,
 					timings?: ChatMessageTimings,
-					toolCalls?: string
+					toolCalls?: string,
+					finishReason?: string
 				) => {
 					const content = streamedContent || finalContent || '';
 					const reasoning = streamedReasoningContent || reasoningContent;
+					const truncated =
+						classifyStopSignal({
+							finishReason,
+							timings,
+							nCtx: this.getContextTotal(),
+							maxTokens: this.requestMaxTokens()
+						}) === 'context-exhausted';
 					const updateData: Record<string, unknown> = {
 						content,
 						reasoningContent: reasoning || undefined,
 						timings,
-						toolCalls: toolCalls || ''
+						toolCalls: toolCalls || '',
+						truncated
 					};
 
 					if (resolvedModel && !modelPersisted) updateData.model = resolvedModel;
@@ -1863,7 +1873,8 @@ class ChatStore {
 					const uiUpdate: Partial<DatabaseMessage> = {
 						content,
 						reasoningContent: reasoning || undefined,
-						toolCalls: toolCalls || ''
+						toolCalls: toolCalls || '',
+						truncated
 					};
 
 					if (timings) uiUpdate.timings = timings;
@@ -3006,7 +3017,7 @@ class ChatStore {
 			// vision gate from stripping folded images). Router mode mirrors the send
 			// path's priority: picker selection first, then the branch's last model.
 			const summaryModel = serverStore.isRouterMode
-				? modelsStore.selectedModelName || (this.getConversationModel(branch) ?? undefined)
+				? modelsStore.selectedModelName || (getConversationModel(branch) ?? undefined)
 				: undefined;
 			const converted = await Promise.all(
 				CompactionService.mergeRecapIntoNextUser(plan.foldMessages).map((m) =>
@@ -3277,6 +3288,14 @@ class ChatStore {
 			cache_n: message.timings.cache_n || 0
 		});
 		this.setProcessingState(conversationId, restoredState);
+	}
+
+	/** The max_tokens the send path actually sends, or null when the user left it unset. */
+	private requestMaxTokens(): number | null {
+		const raw = settingsStore.config.max_tokens;
+		if (raw === undefined || raw === null || raw === '') return null;
+		const value = Number(raw);
+		return Number.isFinite(value) && value > 0 ? value : null;
 	}
 
 	private getApiOptions(): Record<string, unknown> {

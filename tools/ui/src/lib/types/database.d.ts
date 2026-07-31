@@ -142,6 +142,8 @@ export interface DatabaseMessage {
 	timings?: ChatMessageTimings;
 	model?: string;
 	compaction?: CompactionMetadata;
+	/** Set when generation stopped because the context window filled (server stop_type "limit"). */
+	truncated?: boolean;
 }
 
 export type ExportedConversation = {

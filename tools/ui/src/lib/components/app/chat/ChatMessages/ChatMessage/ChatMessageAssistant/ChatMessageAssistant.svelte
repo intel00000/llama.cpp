@@ -8,6 +8,7 @@
 		ChatMessageAssistantStatistics,
 		ChatMessageEditForm
 	} from '$lib/components/app';
+	import { AlertTriangle } from '@lucide/svelte';
 	import { getChatMessageEditContext } from '$lib/contexts';
 	import { MessageRole } from '$lib/enums';
 	import { useProcessingState } from '$lib/hooks/use-processing-state.svelte';
@@ -155,6 +156,13 @@
 
 	{#if showProcessingInfoBottom}
 		<ChatMessageAssistantProcessingInfo {modelLoadingText} {processingState} position="bottom" />
+	{/if}
+
+	{#if message.truncated && !editCtx.isEditing}
+		<div class="mt-2 inline-flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-500">
+			<AlertTriangle class="h-3.5 w-3.5" />
+			<span>Response truncated: the context window is full.</span>
+		</div>
 	{/if}
 
 	{#if displayedModel}
