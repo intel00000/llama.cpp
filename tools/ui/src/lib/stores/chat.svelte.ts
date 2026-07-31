@@ -54,6 +54,7 @@ import type {
 import {
 	classifyContinueIntent,
 	claimOnce,
+	chooseTruncationResubmit,
 	classifyStopSignal,
 	filterByLeafNodeId,
 	findDescendantMessages,
@@ -65,7 +66,8 @@ import {
 	isAbortError,
 	normalizeModelName,
 	replacementLeafAfterDelete,
-	streamIdentity
+	streamIdentity,
+	type TruncationResubmit
 } from '$lib/utils';
 import { PendingMessageQueue, type PendingEntry } from '$lib/utils/pending-queue';
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
@@ -110,6 +112,8 @@ class ChatStore {
 	private compactingConversations = new SvelteSet<string>();
 	/** Conversations mid overflow-recovery to prevent compaction thrashing. */
 	private overflowRecovering = new Set<string>();
+	/** Conversations that already recovered a truncated turn once; blocks a retry loop. */
+	private truncationRecovering = new Set<string>();
 	/** Occupancy + n_ctx at the last failed/refused compaction attempt; the
 	 * auto trigger backs off until occupancy grows past it. */
 	private compactionFailureOccupancy = new Map<string, { occupancy: number; nCtx: number }>();
@@ -1208,6 +1212,8 @@ class ChatStore {
 		if (!content.trim() && (!extras || extras.length === 0)) return;
 
 		const activeConv = conversationsStore.activeConversation;
+		// A new user send opens a new turn chain, so truncation recovery may run again.
+		if (activeConv) this.truncationRecovering.delete(activeConv.id);
 
 		// If agentic loop is running, inject as a steering message instead of starting a new flow
 		if (activeConv && agenticStore.isRunning(activeConv.id)) {
@@ -1894,6 +1900,17 @@ class ChatStore {
 					if (firstUserMessageContent) {
 						await this.generateTitleWithLLM(firstUserMessageContent, streamedContent, convId);
 					}
+
+					// The context filled mid-generation: fold and put the turn back.
+					if (truncated) {
+						await this.recoverFromTruncation(convId, currentMessageId, {
+							content,
+							reasoningContent: reasoning,
+							toolCalls
+						});
+						return;
+					}
+					this.truncationRecovering.delete(convId);
 
 					// Dispatch a message QUEUED during this stream.
 					await this.dispatchQueuedMessage(convId);
@@ -3163,12 +3180,14 @@ class ChatStore {
 	}
 
 	/**
-	 * Overflow backstop: a send failed because the prompt exceeded n_ctx. Fold older
-	 * turns and regenerate the failed assistant on the now-collapsed context.
+	 * Shared recovery for a turn that blow pass n_ctx: fold older turns, then put the
+	 * turn back on the now-collapsed context. `resubmit` picks the approach -
+	 * regenerate a fresh turn, or continue the truncated assistant as a prefill.
 	 */
-	private async recoverFromOverflow(
+	private async recoverByCompaction(
 		conversationId: string,
-		assistantMessage: DatabaseMessage
+		fallbackLeafId: string,
+		resubmit: TruncationResubmit
 	): Promise<boolean> {
 		if (this.overflowRecovering.has(conversationId)) return false;
 		// The retry reads the live active conversation, only recover if still here.
@@ -3177,26 +3196,60 @@ class ChatStore {
 		try {
 			const persisted = await DatabaseService.getConversation(conversationId);
 			if (conversationsStore.activeConversation?.id !== conversationId) return false;
-			const failedLeafId = persisted?.currNode ?? assistantMessage.id;
-			await conversationsStore.updateCurrentNode(failedLeafId);
+			const leafId = persisted?.currNode ?? fallbackLeafId;
+			await conversationsStore.updateCurrentNode(leafId);
 			const result = await this.compactConversation(
 				conversationId,
 				'overflow',
 				this.getOrCreateAbortController(conversationId).signal,
-				failedLeafId
+				leafId
 			);
 			if (!result.compacted) return false;
-			// Check the active conversation again before regenerating, to cover a case
-			// where the user switched conversations while the summary was streaming.
+			// Re-check the active conversation before resubmitting, to cover a case where
+			// the user switched conversations while the summary was streaming.
 			if (conversationsStore.activeConversation?.id !== conversationId) return false;
-			if (conversationsStore.findMessageIndex(failedLeafId) === -1) return false;
-			// Re-run the turn on the now-collapsed context. This will re-send the prompt
-			// and generate a new assistant message.
-			await this.regenerateMessageWithBranching(failedLeafId);
+			if (conversationsStore.findMessageIndex(leafId) === -1) return false;
+			// Put the turn back on the collapsed context. planCompaction never folds the
+			// last turn, so the truncated turn survives as the continue prefill.
+			if (resubmit === 'continue') {
+				await this.continueAssistantMessage(leafId);
+			} else {
+				await this.regenerateMessageWithBranching(leafId);
+			}
 			return true;
 		} finally {
 			this.overflowRecovering.delete(conversationId);
 		}
+	}
+
+	/**
+	 * Overflow backstop: a send failed because the prompt exceeded n_ctx before any
+	 * tokens were generated, so there is nothing to continue - regenerate the turn.
+	 */
+	private async recoverFromOverflow(
+		conversationId: string,
+		assistantMessage: DatabaseMessage
+	): Promise<boolean> {
+		return this.recoverByCompaction(conversationId, assistantMessage.id, 'regenerate');
+	}
+
+	/**
+	 * Generation-time backstop: a turn was cut short because the context filled while
+	 * the model was generating. Fold the context, then continue or regenerate based on
+	 * what was streamed.
+	 */
+	private async recoverFromTruncation(
+		conversationId: string,
+		leafId: string,
+		streamed: { content?: string; reasoningContent?: string; toolCalls?: string }
+	): Promise<void> {
+		if (this.truncationRecovering.has(conversationId)) return;
+		this.truncationRecovering.add(conversationId);
+		const resubmit = chooseTruncationResubmit({
+			...streamed,
+			excludeReasoning: !!settingsStore.config.excludeReasoningFromContext
+		});
+		await this.recoverByCompaction(conversationId, leafId, resubmit);
 	}
 
 	updateProcessingStateFromTimings(
