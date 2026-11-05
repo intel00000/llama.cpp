@@ -1421,6 +1421,30 @@ void llama_model_loader::done_getting_tensors(bool partial) const {
 }
 
 void llama_model_loader::init_mappings(bool prefetch, llama_mlocks * mlock_mmaps) {
+    if (prefetch && use_mmap) {
+        size_t size_prefetch = 0;
+        for (uint32_t idx = 0; idx < files.size(); idx++) {
+            if (lazy.for_file(idx).empty()) {
+                size_prefetch += files[idx]->size();
+            }
+        }
+
+        const char * env = getenv("LLAMA_MMAP_PREFETCH");
+        if (env) {
+            prefetch = atoi(env) != 0;
+            LLAMA_LOG_WARN("%s: prefetch forced %s (LLAMA_MMAP_PREFETCH=%s)\n", __func__, prefetch ? "on" : "off", env);
+        } else if (auto * cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU)) {
+            size_t free  = 0;
+            size_t total = 0;
+            ggml_backend_dev_memory(cpu_dev, &free, &total);
+            if (size_prefetch > free) {
+                LLAMA_LOG_INFO("%s: prefetch size (%.2f GiB) is larger than host memory (%.2f GiB), not prefetching\n",
+                               __func__, size_prefetch / (double) GiB, free / (double) GiB);
+                prefetch = false;
+            }
+        }
+    }
+
     // note: read_lazy also requires mmap; this condition make sure it's usable even when --load-mode is not set to mmap
     if (use_mmap || lazy.any()) {
         mappings.reserve(files.size());
